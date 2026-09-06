@@ -39,8 +39,9 @@ dependencies = [
     "s3fs>=2023.1",
     "filelock>=3.12",
     "zarr>=3.0",
+    "icechunk>=2.2",
     "pandas>=2.0",
-    "pyorbital>=1.7",
+    "pyorbital>=1.7", "pystac-client>=0.9.0,<0.10", "pytorch-lightning>=2.6.5,<3", "wandb>=0.29.0,<0.30", "matplotlib",
 ]
 
 [project.urls]
@@ -78,3 +79,36 @@ dev = [
 
 [tool.setuptools.packages.find]
 include = ["stereo_winds*"]
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+[tool.pixi.pypi-dependencies]
+stereo-winds = { path = ".", editable = true }
+
+[tool.pixi.environments]
+default = { solve-group = "default" }
+dev = { features = ["dev"], solve-group = "default" }
+train = { features = ["train"], solve-group = "default" }
+validation = { features = ["validation"], solve-group = "default" }
+viz = { features = ["viz"], solve-group = "default" }
+
+[tool.pixi.tasks]
+
+[tool.pixi.dependencies]
+h5netcdf = ">=1.8.1,<2"
+h5py = ">=3.16.0,<4"
+netcdf4 = ">=1.7.4,<2"
+pyproj = ">=3.7.2,<4"
+pytest = ">=9.1.1,<10"
+xbatcher = ">=0.4.0,<0.5"
+mpi4py = ">=4.1.2,<5"
+dask = ">=2026.8.0,<2027"
+cartopy = ">=0.25.0,<0.26"
+satpy = ">=0.60.0,<0.61"
+eumdac = ">=3.1.1,<4"
+s3fs = ">=2026.7.0,<2027"
+icechunk = ">=2.2.0,<3"
+zarr = ">=3.3.0,<4"
+fsspec = ">=2026.7.0,<2027"
