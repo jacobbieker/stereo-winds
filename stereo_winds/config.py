@@ -88,6 +88,20 @@ HIMAWARI9_CONFIG = SatelliteConfig(
     n_cols=5500,
 )
 
+# GK-2A AMI 2 km full-disk grid.  AMI uses the same angular sampling as
+# AHI (5500×5500 at 56 µrad/px, y-sweep).  GK-2A sits at 128.2°E.
+GK2A_CONFIG = SatelliteConfig(
+    satellite_id="gk2a",
+    sub_lon_deg=128.2,
+    sweep="y",
+    scale_x=5.6e-05,
+    scale_y=-5.6e-05,
+    x_offset=-0.153719,
+    y_offset=0.153719,
+    n_rows=5500,
+    n_cols=5500,
+)
+
 # MTG-I1 FCI, FDHSI 2 km full-disk grid (5568², extent ±5568 km at
 # perspective height 35786400 m -> 2000/35786400 rad/px). Fallbacks only —
 # data_loading derives the exact values from the file's projection metadata.
@@ -110,6 +124,7 @@ SATELLITE_CONFIGS = {
     "goes19": GOES19_CONFIG,
     "himawari8": HIMAWARI8_CONFIG,
     "himawari9": HIMAWARI9_CONFIG,
+    "gk2a": GK2A_CONFIG,
     "mtg-i1": MTG_I1_CONFIG,
 }
 
@@ -183,6 +198,26 @@ ABI_TO_FCI_BAND = {
     "C13": "ir_105",   # 10.35 / 10.50 um
     "C15": "ir_123",   # 12.30 / 12.30 um
     "C16": "ir_133",   # 13.30 / 13.30 um
+}
+
+# ABI band -> AMI (GK-2A) channel. AMI has 16 channels with similar
+# spectral coverage to AHI. C06 (2.25 um) has no AMI equivalent.
+ABI_TO_AMI_BAND = {
+    "C01": "VI004",   # 0.47  / 0.47  um
+    "C02": "VI006",   # 0.64  / 0.64  um
+    "C03": "VI008",   # 0.865 / 0.86  um
+    "C04": "NR013",   # 1.378 / 1.37  um
+    "C05": "NR016",   # 1.61  / 1.6   um
+    "C07": "SW038",   # 3.90  / 3.8   um
+    "C08": "WV063",   # 6.19  / 6.3   um
+    "C09": "WV069",   # 6.95  / 6.9   um
+    "C10": "WV073",   # 7.34  / 7.3   um
+    "C11": "IR087",   # 8.44  / 8.7   um
+    "C12": "IR096",   # 9.61  / 9.6   um
+    "C13": "IR105",   # 10.35 / 10.5  um
+    "C14": "IR112",   # 11.20 / 11.2  um
+    "C15": "IR123",   # 12.30 / 12.3  um
+    "C16": "IR133",   # 13.30 / 13.3  um
 }
 
 

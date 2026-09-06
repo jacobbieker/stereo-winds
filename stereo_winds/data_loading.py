@@ -295,6 +295,7 @@ def load_goes_scene(
     stream: bool = False,
     return_aux: bool = False,
     quantity: str = "rad",
+    coarsen: bool = True,
 ):
     """Load a GOES ABI scene using zeus, returning native fixed-grid data.
 
@@ -315,6 +316,8 @@ def load_goes_scene(
     quantity : "rad" (default, native L1b radiance) or "bt" (brightness
         temperature, emissive bands only — the quantity the student's
         training cubes carry)
+    coarsen : if True (default), high-res bands are block-mean downsampled
+        to the canonical 2 km grid. Set to False to keep native resolution.
 
     Returns
     -------
@@ -345,7 +348,8 @@ def load_goes_scene(
 
     sat_config = _sat_config_from_satpy(ds, satellite)
     # High-res VIS bands (e.g. C02 0.5 km) -> canonical 2 km grid
-    data, sat_config, _ = _coarsen_to_canonical(data, sat_config, satellite)
+    if coarsen:
+        data, sat_config, _ = _coarsen_to_canonical(data, sat_config, satellite)
     logger.info(
         "  %s: %dx%d, sub_lon=%.2f°",
         satellite, sat_config.n_rows, sat_config.n_cols, sat_config.sub_lon_deg,
@@ -393,8 +397,9 @@ def load_fci_scene(
     satellite: str = "mtg-i1",
     cache_dir: str | Path | None = None,
     return_aux: bool = False,
+    coarsen: bool = True,
 ):
-    """Load an MTG FCI L1c scene using zeus, in native fixed-grid coordinates.
+    """Load an MTG FCI scene from icechunk, in native fixed-grid coordinates.
 
     The retrieval band is given as the ABI name (e.g. "C13") and translated
     to the FCI channel via ``ABI_TO_FCI_BAND``; a native FCI name (e.g.
@@ -402,13 +407,15 @@ def load_fci_scene(
 
     Parameters
     ----------
-    t : target datetime (snapped to the 10-min repeat cycle)
+    t : target datetime (snapped to the nearest available time step)
     band : ABI band name ("C13") or FCI channel name ("ir_105")
     satellite : satellite identifier ("mtg-i1")
-    cache_dir : local cache directory for downloaded chunk files
+    cache_dir : unused (kept for API compatibility); icechunk reads
+        directly from source.coop
     return_aux : if True, also return an aux dict with actual observation
-        "t_start"/"t_end" and the per-pixel acquisition time field
-        "pixel_time" ((H, W) float64 Unix seconds, row 0 = north)
+        "t_start"/"t_end" and "pixel_time" (None for the icechunk reader)
+    coarsen : if True (default), high-res bands are block-mean downsampled
+        to the canonical 2 km grid. Set to False to keep native resolution.
 
     Returns
     -------
@@ -416,43 +423,22 @@ def load_fci_scene(
     sat_config : SatelliteConfig with scanning-angle coordinates in radians
     aux : dict (only if return_aux)
     """
-    raise NotImplementedError(
-        "MTG-I FCI loading is not yet ported to the standalone build. It "
-        "requires satpy (fci_l1c_nc) + eumdac (EUMETSAT Data Store auth); a "
-        "standalone readers.fci is planned. GOES-R ABI is fully supported.")
+    from stereo_winds.readers.mtg import MTG, _resolve_band
 
-    import dask  # noqa: F401  (deferred FCI port below)
-    from zeus.datasets.core.base import DataSourceConfig
-    from zeus.datasets.sources.mtg_fci import FCI, BANDS_ALL
+    fci_band = _resolve_band(band)
+    logger.info("Loading %s %s (from %s) at %s via icechunk",
+                satellite, fci_band, band, t)
 
-    fci_band = band if band in BANDS_ALL else ABI_TO_FCI_BAND.get(band)
-    if fci_band is None:
-        raise ValueError(
-            f"No FCI equivalent for band {band!r}. "
-            f"ABI bands with a twin: {sorted(ABI_TO_FCI_BAND)}"
-        )
-
-    source = FCI(
-        config=DataSourceConfig(cache_dir=cache_dir),
-        bands=[fci_band],
-    )
-    logger.info("Loading %s %s (from %s) at %s via zeus", satellite, fci_band, band, t)
-
-    # data_at_time reads synchronously and returns a fully materialized
-    # dataset (threaded HDF5 reads segfault; handles close with the Scene).
-    ds = source.data_at_time(t, include_pixel_times=return_aux)
+    source = MTG(satellite=satellite, bands=[fci_band])
+    ds = source.data_at_time(t)
 
     # Extract 2D array: squeeze time and band dims; flip to row 0 = north
     data = ds["Rad"].values[0, 0, :, :].astype(np.float32)[::-1]
 
     sat_config = _sat_config_from_satpy(ds, satellite, sweep=MTG_I1_CONFIG.sweep)
-    # High-res VIS bands (1 km) -> canonical 2 km grid
-    data, sat_config, coarsen_f = _coarsen_to_canonical(data, sat_config, satellite)
-    # fci_l1c_nc exposes the projection sweep via the area; if satpy carried
-    # it through in the attrs, prefer the file's value.
-    proj = ds["Rad"].attrs.get("mtg_geos_projection", None)
-    if isinstance(proj, dict) and "sweep_angle_axis" in proj:
-        sat_config.sweep = str(proj["sweep_angle_axis"])
+    # High-res VIS bands (1 km / 500 m) -> canonical 2 km grid
+    if coarsen:
+        data, sat_config, _ = _coarsen_to_canonical(data, sat_config, satellite)
 
     logger.info(
         "  %s: %dx%d, sub_lon=%.2f°, sweep=%s",
@@ -461,17 +447,9 @@ def load_fci_scene(
     )
 
     if return_aux:
-        pt = ds["pixel_time"].values[0, 0, :, :]
-        pt = _pixel_time_to_unix(pt, ds["pixel_time"].attrs)[::-1]
-        # Mask fill values: anything > 1 day from the nominal time is junk
-        t_unix = (np.datetime64(t.replace(tzinfo=None)) - _UNIX_EPOCH) / np.timedelta64(1, "s")
-        pt = np.where(np.abs(pt - t_unix) < 86400.0, pt, np.nan)
-        if coarsen_f > 1:
-            # Subsample is fine for time (adjacent-pixel variation << 1 s)
-            pt = pt[::coarsen_f, ::coarsen_f][:sat_config.n_rows, :sat_config.n_cols]
         t_start, t_end = _scene_time_bounds(ds)
         return data, sat_config, {"t_start": t_start, "t_end": t_end,
-                                  "pixel_time": pt}
+                                  "pixel_time": None}
     return data, sat_config
 
 
@@ -489,17 +467,103 @@ def download_abi(
     return source.download(t)
 
 
-def download_ahi(
+def load_himawari_scene(
     t: dt.datetime,
     band: str,
-    satellite: str = "himawari8",
-    cache_dir: str | Path | None = None,
-) -> list[Path]:
-    """Download AHI L1b files. Not available in the standalone build."""
-    raise NotImplementedError(
-        "Himawari AHI loading is not included in the standalone stereo-winds "
-        "build. GOES-R ABI (readers.goes) and MTG FCI (readers.fci) are "
-        "supported; add an AHI reader to enable this path.")
+    satellite: str = "himawari9",
+    return_aux: bool = False,
+    coarsen: bool = True,
+):
+    """Load a Himawari AHI scene from icechunk, in native fixed-grid coords.
+
+    Parameters
+    ----------
+    t : target datetime (snapped to nearest available scan time)
+    band : AHI band name (e.g. "B14") or ABI band name (e.g. "C14")
+    satellite : satellite identifier ("himawari8" or "himawari9")
+    return_aux : if True, also return an aux dict with timing metadata
+    coarsen : if True (default), high-res bands are block-mean downsampled
+        to the canonical 2 km grid. Set to False to keep native resolution.
+
+    Returns
+    -------
+    data : (n_rows, n_cols) float32 array, row 0 = north
+    sat_config : SatelliteConfig with scanning-angle coordinates in radians
+    aux : dict (only if return_aux)
+    """
+    from stereo_winds.readers.himawari import Himawari
+
+    source = Himawari(satellite=satellite, bands=[band])
+    logger.info("Loading %s %s at %s via icechunk", satellite, band, t)
+
+    ds = source.data_at_time(t)
+
+    # Extract 2D array: squeeze time and band dims
+    data = ds["Rad"].values[0, 0, :, :].astype(np.float32)
+
+    # Flip y: satpy-like output is south->north, we need north->south
+    data = data[::-1]
+
+    sat_config = _sat_config_from_satpy(ds, satellite, sweep="y")
+    if coarsen:
+        data, sat_config, _ = _coarsen_to_canonical(data, sat_config, satellite)
+    logger.info(
+        "  %s: %dx%d, sub_lon=%.2f°",
+        satellite, sat_config.n_rows, sat_config.n_cols, sat_config.sub_lon_deg,
+    )
+    if return_aux:
+        t_start, t_end = _scene_time_bounds(ds)
+        return data, sat_config, {"t_start": t_start, "t_end": t_end,
+                                  "pixel_time": None}
+    return data, sat_config
+
+
+def load_gk2a_scene(
+    t: dt.datetime,
+    band: str,
+    satellite: str = "gk2a",
+    return_aux: bool = False,
+    coarsen: bool = True,
+):
+    """Load a GK-2A AMI scene from icechunk, in native fixed-grid coords.
+
+    Parameters
+    ----------
+    t : target datetime (snapped to nearest available scan time)
+    band : AMI band name (e.g. "IR112") or ABI band name (e.g. "C14")
+    satellite : satellite identifier ("gk2a")
+    return_aux : if True, also return an aux dict with timing metadata
+    coarsen : if True (default), high-res bands are block-mean downsampled
+        to the canonical 2 km grid. Set to False to keep native resolution.
+
+    Returns
+    -------
+    data : (n_rows, n_cols) float32 array, row 0 = north
+    sat_config : SatelliteConfig with scanning-angle coordinates in radians
+    aux : dict (only if return_aux)
+    """
+    from stereo_winds.readers.gk2a import GK2A
+
+    source = GK2A(satellite=satellite, bands=[band])
+    logger.info("Loading %s %s at %s via icechunk", satellite, band, t)
+
+    ds = source.data_at_time(t)
+
+    data = ds["Rad"].values[0, 0, :, :].astype(np.float32)
+    data = data[::-1]
+
+    sat_config = _sat_config_from_satpy(ds, satellite, sweep="y")
+    if coarsen:
+        data, sat_config, _ = _coarsen_to_canonical(data, sat_config, satellite)
+    logger.info(
+        "  %s: %dx%d, sub_lon=%.2f°",
+        satellite, sat_config.n_rows, sat_config.n_cols, sat_config.sub_lon_deg,
+    )
+    if return_aux:
+        t_start, t_end = _scene_time_bounds(ds)
+        return data, sat_config, {"t_start": t_start, "t_end": t_end,
+                                  "pixel_time": None}
+    return data, sat_config
 
 
 def load_stereo_scenes(
@@ -513,6 +577,7 @@ def load_stereo_scenes(
     product: str = "ABI-L1b-RadF",
     stream: bool = False,
     return_times: bool = False,
+    coarsen: bool = True,
 ):
     """Load all 5 scenes for a stereo retrieval.
 
@@ -528,6 +593,8 @@ def load_stereo_scenes(
         satellite B an ABI band name is translated via ABI_TO_FCI_BAND)
     cache_dir : local cache directory
     product : ABI product type (e.g., "ABI-L1b-RadF")
+    coarsen : if True (default), high-res bands are block-mean downsampled
+        to the canonical 2 km grid. Set to False to keep native resolution.
     return_times : if True, also return a per-scene timing dict with keys
         "t_nominal" (requested datetime), "t_start"/"t_end" (actual
         observation bounds, or None), and "pixel_time" ((H, W) float64 Unix
@@ -559,20 +626,29 @@ def load_stereo_scenes(
 
         if "goes" in sat_id:
             out = load_goes_scene(t, band, sat_id, cache_dir, product=product,
-                                  stream=stream, return_aux=return_times)
+                                  stream=stream, return_aux=return_times,
+                                  coarsen=coarsen)
             data, config = out[0], out[1]
             if return_times:
                 aux = out[2]
         elif "himawari" in sat_id:
-            files = download_ahi(t, band, sat_id, cache_dir)
-            if not files:
-                raise FileNotFoundError(
-                    f"No data found for {sat_id} at {t} band {band}"
-                )
-            data, config = load_native_abi(files[0], sat_id)
+            out = load_himawari_scene(t, band, sat_id,
+                                      return_aux=return_times,
+                                      coarsen=coarsen)
+            data, config = out[0], out[1]
+            if return_times:
+                aux = out[2]
+        elif "gk2a" in sat_id:
+            out = load_gk2a_scene(t, band, sat_id,
+                                  return_aux=return_times,
+                                  coarsen=coarsen)
+            data, config = out[0], out[1]
+            if return_times:
+                aux = out[2]
         elif "mtg" in sat_id:
             out = load_fci_scene(t, band, sat_id, cache_dir,
-                                 return_aux=return_times)
+                                 return_aux=return_times,
+                                 coarsen=coarsen)
             data, config = out[0], out[1]
             if return_times:
                 aux = out[2]
