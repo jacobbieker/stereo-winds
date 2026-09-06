@@ -77,6 +77,11 @@ dev = [
     "pyproj>=3.5",
 ]
 
+[tool.pytest.ini_options]
+markers = [
+    "network: tests that require network access to source.coop icechunk stores",
+]
+
 [tool.setuptools.packages.find]
 include = ["stereo_winds*"]
 

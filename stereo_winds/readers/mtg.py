@@ -68,17 +68,15 @@ def _open_store(prefix: str) -> Any:
     """Open an icechunk store in read-only mode."""
     import icechunk
 
-    storage = icechunk.StorageConfig.s3_from_config(
+    storage = icechunk.s3_storage(
         bucket=_BUCKET,
         prefix=prefix,
-        config=icechunk.S3Config(
-            endpoint_url=_ENDPOINT,
-            region="us-east-1",
-            allow_http=False,
-            anonymous=True,
-        ),
+        endpoint_url=_ENDPOINT,
+        anonymous=True,
+        force_path_style=True,
     )
-    return icechunk.IcechunkStore.open_existing(storage=storage, mode="r")
+    repo = icechunk.Repository.open(storage)
+    return repo.readonly_session("main").store
 
 
 def _resolve_band(band: str) -> str:
@@ -138,7 +136,11 @@ class MTG:
         prefix = self._store_prefix(resolution)
         logger.info("Opening icechunk store %s/%s", _BUCKET, prefix)
         store = _open_store(prefix)
-        return xr.open_zarr(store)
+        ds = xr.open_zarr(store)
+        if "time" in ds.dims:
+            _, unique_idx = np.unique(ds["time"].values, return_index=True)
+            ds = ds.isel(time=np.sort(unique_idx)).sortby("time")
+        return ds
 
     def _select_time(
         self, ds: xr.Dataset, t: dt.datetime,
