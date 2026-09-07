@@ -80,6 +80,8 @@ dev = [
 [tool.pytest.ini_options]
 markers = [
     "network: tests that require network access to source.coop icechunk stores",
+    "integration: student model integration tests (requires checkpoint, slow)",
+    "integration_live: student model + live icechunk data (requires checkpoint + network)",
 ]
 
 [tool.setuptools.packages.find]
