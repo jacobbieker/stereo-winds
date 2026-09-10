@@ -110,6 +110,27 @@ def _load_three_frames(
 # Build student model input stack
 # ---------------------------------------------------------------------------
 
+def _band_available(sat_id: str, band: str) -> bool:
+    """Check whether an ABI band can be loaded for the given satellite.
+
+    Bands that have no spectral equivalent on a satellite (e.g. ABI C09
+    and C14 on MTG FCI) return False so the caller can substitute zeros.
+    """
+    if "goes" in sat_id:
+        return True  # ABI has all ABI bands
+    if "himawari" in sat_id:
+        from stereo_winds.readers.himawari import _ABI_TO_AHI, _BAND_RESOLUTION
+        return band in _BAND_RESOLUTION or band in _ABI_TO_AHI
+    if "gk2a" in sat_id:
+        from stereo_winds.readers.gk2a import _ABI_TO_AMI, _BAND_RESOLUTION
+        return band in _BAND_RESOLUTION or band in _ABI_TO_AMI
+    if "mtg" in sat_id:
+        from stereo_winds.config import ABI_TO_FCI_BAND
+        from stereo_winds.readers.mtg import _BAND_RESOLUTION
+        return band in _BAND_RESOLUTION or band in ABI_TO_FCI_BAND
+    return True
+
+
 def _build_input_stack(
     sat_id: str,
     sat: SatelliteConfig,
@@ -121,13 +142,23 @@ def _build_input_stack(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Build the (C, H, W) flow/rad/geom input stack from icechunk data.
 
+    Bands that have no spectral equivalent on the target satellite are
+    filled with NaN (and masked out in the finite_mask), keeping the
+    channel count consistent with the trained student checkpoint.
+
     Returns (flow_arr, rad_arr, geom_arr, finite_mask).
     """
+    H, W = sat.n_rows, sat.n_cols
     flow_chans: list[np.ndarray] = []
     cached: dict[str, tuple] = {}  # band -> (a_m, a_0, a_p, valid)
 
     logger.info("  Loading flow bands: %s", flow_bands)
     for band in flow_bands:
+        if not _band_available(sat_id, band):
+            logger.warning("  Band %s unavailable on %s — filling with zeros", band, sat_id)
+            zero = np.zeros((H, W), dtype=np.float32)
+            flow_chans += [zero, zero.copy(), zero.copy(), zero.copy()]
+            continue
         a_m, a_0, a_p = _load_three_frames(sat_id, band, t0)
         valid = np.isfinite(a_m) & np.isfinite(a_0) & np.isfinite(a_p)
         fb = disp._run_pair(a_0, a_m)
@@ -140,6 +171,13 @@ def _build_input_stack(
     rad_chans: list[np.ndarray] = []
     logger.info("  Loading rad bands: %s", rad_bands)
     for band in rad_bands:
+        if not _band_available(sat_id, band):
+            logger.warning("  Band %s unavailable on %s — filling with zeros", band, sat_id)
+            n_frames = rad_time_frames if rad_time_frames == 3 else 1
+            for _ in range(n_frames):
+                rad_chans.append(np.zeros((H, W), dtype=np.float32))
+            continue
+
         if band in cached:
             a_m, a_0, a_p, vb = cached[band]
         else:
