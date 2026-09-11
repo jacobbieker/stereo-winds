@@ -1,33 +1,82 @@
-"""Global geostationary ring student AMV inference.
+r"""Global geostationary ring student AMV inference.
 
-For a given time, loads imagery from every available geostationary satellite
-(GOES-18, GOES-19, Himawari-9, GK-2A, MTG-I1) via icechunk, runs the
-single-satellite student model on each, and produces:
+For a given time (or a range of times), loads imagery from every available
+geostationary satellite (GOES-18, GOES-19, Himawari-9, GK-2A, MTG-I1 and
+MSG/SEVIRI at 45.5°E) via icechunk — falling back to public-S3 L1b where
+a store does not cover the time — runs the single-satellite student model
+on each, and produces:
 
 1. Per-satellite NetCDF files with full-disk AMVs
 2. A combined global NetCDF on a regular lat/lon grid, where overlapping
    regions use the AMV from whichever satellite has the smallest zenith
    angle (closest to the sub-satellite point)
 
+Outputs use a deterministic layout under ``--output-dir``::
+
+    <output-dir>/<YYYYMMDD>/student_amv_<sat_id>_<YYYYMMDDTHHMM>.nc
+    <output-dir>/<YYYYMMDD>/student_amv_global_<YYYYMMDDTHHMM>.nc
+
+so a run over a time range can be re-run, resumed (``--skip-existing``)
+and globbed without ambiguity.
+
+Satellites are not all on the same schedule: SEVIRI repeats every 15
+minutes where the rest of the ring scans every 10, so temporal pairs use
+each satellite's own cadence and the resulting flow is rescaled to the
+interval the student was trained on.
+
+``--require-all-satellites`` lists each satellite's scan times up front
+(icechunk time coordinates, or an S3 listing for GOES) and processes
+only the timestamps where every satellite can supply a full
+t-10min/t/t+10min triplet, so the mosaic has the same contributors at
+every output time.
+
+With ``--icechunk-store`` the global mosaic is additionally appended to
+an icechunk store (S3 or local) as one commit per timestamp, and
+``--skip-existing`` then resumes from the timestamps that store already
+holds.  Pass ``--no-netcdf`` to write only to the store.
+
+Navigation always uses the projection metadata carried by the scenes
+actually loaded — sub-satellite longitude, perspective height and grid
+scale/offset — never a hardcoded nominal value, because geostationary
+satellites drift within their station-keeping box and are periodically
+relocated.  ``SATELLITE_CONFIGS`` serves only as a cross-check, and a
+disagreement beyond ``SUB_LON_TOL_DEG`` is logged.
+
 Usage::
 
-    pixi run python scripts/infer_student_global_ring.py \\
-        --time "2025-03-10T12:00" \\
-        --student-ckpt checkpoints/student.abi.mb-v3.ep21.ckpt \\
-        --raft-ckpt checkpoints/windflow.raft.sonde-tuned.ckpt \\
-        --output-dir output/global_ring \\
+    # single time
+    pixi run python scripts/infer_student_global_ring.py \
+        --time "2025-03-10T12:00" \
+        --student-ckpt checkpoints/student.abi.mb-v3.ep21.ckpt \
+        --raft-ckpt checkpoints/windflow.raft.sonde-tuned.ckpt \
+        --output-dir output/global_ring \
         --device cuda
+
+    # time range appended to an S3 icechunk store, resuming what it holds
+    pixi run python scripts/infer_student_global_ring.py \
+        --time "2026-08-01T00:00" --end-time "2026-08-30T00:00" \
+        --step-minutes 10 --skip-existing --no-netcdf \
+        --icechunk-store s3://my-bucket/student-amv.icechunk \
+        --student-ckpt checkpoints/student.abi.mb-v3.ep21.ckpt \
+        --raft-ckpt checkpoints/windflow.raft.sonde-tuned.ckpt \
+        --device cuda
+
+    # time range, every 30 minutes, resuming a previous run
+    pixi run python scripts/infer_student_global_ring.py --time "2026-08-01T00:00" --end-time "2026-08-02T00:00" --step-minutes 10 --student-ckpt checkpoints/student.abi.mb-v3.ep21.ckpt --raft-ckpt checkpoints/windflow.raft.sonde-tuned.ckpt --output-dir output/global_ring --device cuda
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import re
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlparse
 
 import numpy as np
+import pandas as pd
 import torch
 import xarray as xr
 
@@ -53,6 +102,9 @@ from stereo_winds.student_zeus_model import StudentWindsModel
 logger = logging.getLogger(__name__)
 
 DT_MINUTES = 10
+# Sub-satellite longitude agreement tolerance (deg).  Station-keeping
+# boxes are typically +/-0.1 deg, so anything larger is worth flagging.
+SUB_LON_TOL_DEG = 0.05
 OUTPUT_VARS = [
     "u_wind", "v_wind", "cloud_top_height",
     "quality_flag", "sigma_u", "sigma_v", "sigma_h",
@@ -65,45 +117,398 @@ RING_SATELLITES = [
     "goes18",     # 137°W
     "goes19",     # 75°W
     "mtg-i1",     # 0°E
+    "msg-iodc",   # 45.5°E
     "gk2a",       # 128.2°E
     "himawari9",  # 140.7°E
 ]
+
+# Full-disk repeat cycle per satellite.  Everything in the ring scans
+# every 10 minutes except MSG/SEVIRI, which takes 15.
+SCAN_INTERVAL_MINUTES: dict[str, int] = {"msg-iodc": 15}
+
+
+def scan_interval(sat_id: str) -> int:
+    """Minutes between consecutive full disks for this satellite."""
+    return SCAN_INTERVAL_MINUTES.get(sat_id, DT_MINUTES)
+
+
+# ---------------------------------------------------------------------------
+# Deterministic output naming
+# ---------------------------------------------------------------------------
+
+TIME_TAG_FMT = "%Y%m%dT%H%M"
+DAY_DIR_FMT = "%Y%m%d"
+
+
+def time_tag(t: datetime) -> str:
+    """Canonical timestamp tag used in every output filename."""
+    return t.strftime(TIME_TAG_FMT)
+
+
+def day_dir(out_dir: Path, t: datetime) -> Path:
+    """Per-day subdirectory holding all files for timestamps on that day."""
+    return Path(out_dir) / t.strftime(DAY_DIR_FMT)
+
+
+def sat_nc_path(out_dir: Path, sat_id: str, t: datetime) -> Path:
+    """Path of the per-satellite full-disk AMV file for ``t``."""
+    return day_dir(out_dir, t) / f"student_amv_{sat_id}_{time_tag(t)}.nc"
+
+
+def global_nc_path(out_dir: Path, t: datetime) -> Path:
+    """Path of the merged global mosaic file for ``t``."""
+    return day_dir(out_dir, t) / f"student_amv_global_{time_tag(t)}.nc"
+
+
+def time_steps(
+    start: datetime, end: datetime | None, step_minutes: int,
+) -> list[datetime]:
+    """Inclusive list of timestamps from ``start`` to ``end`` every ``step``.
+
+    An ``end`` of None (or equal to ``start``) yields a single timestamp.
+    """
+    if end is None or end == start:
+        return [start]
+    if end < start:
+        raise ValueError(f"--end-time ({end}) is before --time ({start})")
+    if step_minutes <= 0:
+        raise ValueError(f"--step-minutes must be positive, got {step_minutes}")
+    step = timedelta(minutes=step_minutes)
+    out: list[datetime] = []
+    t = start
+    while t <= end:
+        out.append(t)
+        t += step
+    return out
 
 
 # ---------------------------------------------------------------------------
 # Data loading: 3-frame radiance cubes from icechunk
 # ---------------------------------------------------------------------------
 
-def _load_scene(sat_id: str, band: str, t: datetime) -> np.ndarray:
-    """Load a single 2D radiance scene for the given satellite and band."""
+def _load_scene(
+    sat_id: str, band: str, t: datetime,
+) -> tuple[np.ndarray, SatelliteConfig]:
+    """Load one 2D radiance scene plus the config the loader read from it.
+
+    The returned ``SatelliteConfig`` carries the projection parameters of
+    *this* scene — sub-satellite longitude, perspective height and grid
+    scale/offset as recorded in the file or icechunk store — and is what
+    navigation must use.  Geostationary satellites drift within their
+    station-keeping box and are periodically relocated, so the nominal
+    values in ``SATELLITE_CONFIGS`` are only a sanity-check reference.
+    """
     if "goes" in sat_id:
         from stereo_winds.data_loading import load_goes_scene
-        data, _ = load_goes_scene(t, band, sat_id)
-        return data
+        return load_goes_scene(t, band, sat_id)
     elif "himawari" in sat_id:
         from stereo_winds.data_loading import load_himawari_scene
-        data, _ = load_himawari_scene(t, band, sat_id)
-        return data
+        return load_himawari_scene(t, band, sat_id)
     elif "gk2a" in sat_id:
         from stereo_winds.data_loading import load_gk2a_scene
-        data, _ = load_gk2a_scene(t, band, sat_id)
-        return data
+        return load_gk2a_scene(t, band, sat_id)
     elif "mtg" in sat_id:
         from stereo_winds.data_loading import load_fci_scene
-        data, _ = load_fci_scene(t, band, sat_id)
-        return data
+        return load_fci_scene(t, band, sat_id)
+    elif "msg" in sat_id:
+        from stereo_winds.data_loading import load_msg_scene
+        return load_msg_scene(t, band, sat_id)
     raise ValueError(f"Unknown satellite: {sat_id}")
 
 
+def _grid_key(cfg: SatelliteConfig) -> tuple:
+    """Grid identity used to check that frames share one fixed grid."""
+    return (cfg.n_rows, cfg.n_cols,
+            round(cfg.scale_x, 12), round(cfg.scale_y, 12),
+            round(cfg.x_offset, 9), round(cfg.y_offset, 9))
+
+
+def _check_same_grid(
+    ref: SatelliteConfig, other: SatelliteConfig, what: str,
+) -> None:
+    """Warn when a frame does not sit on the same fixed grid as the reference.
+
+    Optical flow between frames on different grids is meaningless, and a
+    changed sub-satellite longitude mid-triplet means the satellite was
+    manoeuvred between scans.
+    """
+    if abs(other.sub_lon_deg - ref.sub_lon_deg) > SUB_LON_TOL_DEG:
+        logger.warning(
+            "  %s: sub-satellite longitude changed %.4f° -> %.4f° between "
+            "frames — the satellite moved mid-triplet",
+            what, ref.sub_lon_deg, other.sub_lon_deg,
+        )
+    if _grid_key(other) != _grid_key(ref):
+        logger.warning("  %s: fixed grid differs from the reference frame", what)
+
+
 def _load_three_frames(
-    sat_id: str, band: str, t0: datetime, dt_min: int = DT_MINUTES,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Load t-dt, t0, t+dt radiance frames for a single band."""
+    sat_id: str, band: str, t0: datetime, dt_min: int | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, SatelliteConfig, int]:
+    """Load t-dt, t0, t+dt radiance frames plus the t0 scene's config.
+
+    ``dt_min`` defaults to the satellite's own repeat cycle: asking MSG
+    for frames 10 minutes apart would just return the same 15-minute
+    scans, mislabelled.  The interval actually used is returned so the
+    caller can scale the resulting flow.
+    """
+    if dt_min is None:
+        dt_min = scan_interval(sat_id)
     delta = timedelta(minutes=dt_min)
-    a_m = _load_scene(sat_id, band, t0 - delta)
-    a_0 = _load_scene(sat_id, band, t0)
-    a_p = _load_scene(sat_id, band, t0 + delta)
-    return a_m, a_0, a_p
+    a_m, cfg_m = _load_scene(sat_id, band, t0 - delta)
+    a_0, cfg_0 = _load_scene(sat_id, band, t0)
+    a_p, cfg_p = _load_scene(sat_id, band, t0 + delta)
+    # t0 defines the retrieval grid; the neighbours must match it.
+    _check_same_grid(cfg_0, cfg_m, f"{sat_id} {band} t-{dt_min}min")
+    _check_same_grid(cfg_0, cfg_p, f"{sat_id} {band} t+{dt_min}min")
+    return a_m, a_0, a_p, cfg_0, dt_min
+
+
+# ---------------------------------------------------------------------------
+# Availability: which timestamps every satellite can actually deliver
+# ---------------------------------------------------------------------------
+
+def availability_band(
+    sat_id: str, flow_bands: list[str], rad_bands: list[str],
+) -> str | None:
+    """First requested band this satellite actually carries.
+
+    Availability is checked per satellite on one band: the scan times are
+    a property of the instrument's schedule, not of the channel.
+    """
+    for band in list(flow_bands) + list(rad_bands):
+        if _band_available(sat_id, band):
+            return band
+    return None
+
+
+def _icechunk_source(sat_id: str, band: str):
+    """(reader, store resolution tier) for an icechunk-backed satellite."""
+    if "himawari" in sat_id:
+        from stereo_winds.readers.himawari import _BAND_RESOLUTION, Himawari
+        src = Himawari(satellite=sat_id, bands=[band])
+    elif "gk2a" in sat_id:
+        from stereo_winds.readers.gk2a import _BAND_RESOLUTION, GK2A
+        src = GK2A(satellite=sat_id, bands=[band])
+    elif "mtg" in sat_id:
+        from stereo_winds.readers.mtg import _BAND_RESOLUTION, MTG
+        src = MTG(satellite=sat_id, bands=[band])
+    elif "msg" in sat_id:
+        from stereo_winds.readers.msg import _BAND_RESOLUTION, MSG
+        src = MSG(satellite=sat_id, bands=[band])
+    else:
+        raise ValueError(f"No icechunk reader for {sat_id!r}")
+    return src, _BAND_RESOLUTION[src.bands[0]]
+
+
+def _icechunk_available_times(
+    sat_id: str, band: str, start: datetime, end: datetime,
+) -> np.ndarray:
+    """Scan times in the store between ``start`` and ``end`` (inclusive)."""
+    src, resolution = _icechunk_source(sat_id, band)
+    ds = src._open_dataset(resolution)
+    times = np.asarray(ds["time"].values, dtype="datetime64[ns]")
+    lo = np.datetime64(start, "ns")
+    hi = np.datetime64(end, "ns")
+    return np.unique(times[(times >= lo) & (times <= hi)])
+
+
+_ABI_START_RE = re.compile(r"_s(\d{13})")
+
+
+def _goes_available_times(
+    sat_id: str, band: str, start: datetime, end: datetime,
+    product: str = "ABI-L1b-RadF",
+) -> np.ndarray:
+    """Scan start times on NOAA's public S3 bucket, listed one day at a time."""
+    from stereo_winds.readers.goes import _GNUM, GOES
+
+    src = GOES(satellite=sat_id, product=product, bands=[band])
+    gnum = _GNUM[sat_id]
+    found: list[np.datetime64] = []
+    day = start.date()
+    last = end.date()
+    while day <= last:
+        d = datetime(day.year, day.month, day.day)
+        pattern = (f"{src.bucket}/{product}/{d:%Y/%j}/*/"
+                   f"OR_{product}-M*{band}_G{gnum}_s*")
+        for key in src.fs.glob(pattern):
+            match = _ABI_START_RE.search(key)
+            if match is None:
+                continue
+            try:
+                t = datetime.strptime(match.group(1), "%Y%j%H%M%S")
+            except ValueError:
+                continue
+            if start <= t <= end:
+                found.append(np.datetime64(t, "ns"))
+        day += timedelta(days=1)
+    return np.unique(np.array(found, dtype="datetime64[ns]"))
+
+
+_AHI_SLOT_RE = re.compile(r"HS_H\d\d_(\d{8})_(\d{4})_")
+_AMI_SLOT_RE = re.compile(r"_(\d{12})\.nc$")
+
+
+def _s3_l1b_times(
+    sat_id: str, band: str, start: datetime, end: datetime,
+) -> np.ndarray:
+    """Slot times on the public NOAA bucket the readers fall back to.
+
+    Listed one day at a time, one file per slot (a single HSD segment
+    for AHI, the single netCDF for AMI).
+    """
+    from stereo_winds.readers._satpy_s3 import s3_filesystem
+
+    if "himawari" in sat_id:
+        from stereo_winds.readers.himawari import (
+            _S3_BUCKET, _S3_PLATFORM, _S3_PREFIX, Himawari,
+        )
+        resolved = Himawari(satellite=sat_id, bands=[band]).bands[0]
+        def pattern(d: datetime) -> str:
+            return (f"{_S3_BUCKET[sat_id]}/{_S3_PREFIX}/{d:%Y/%m/%d}/*/"
+                    f"HS_{_S3_PLATFORM[sat_id]}_*_{resolved}_FLDK_R*_S0110.DAT*")
+        def parse(key: str) -> datetime | None:
+            m = _AHI_SLOT_RE.search(key)
+            return (datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M")
+                    if m else None)
+    elif "gk2a" in sat_id:
+        from stereo_winds.readers.gk2a import _S3_BUCKET, _S3_PREFIX, GK2A
+        resolved = GK2A(satellite=sat_id, bands=[band]).bands[0].lower()
+        def pattern(d: datetime) -> str:
+            return (f"{_S3_BUCKET}/{_S3_PREFIX}/{d:%Y%m}/{d:%d}/*/"
+                    f"gk2a_ami_le1b_{resolved}_fd*ge_*.nc")
+        def parse(key: str) -> datetime | None:
+            m = _AMI_SLOT_RE.search(key)
+            return (datetime.strptime(m.group(1), "%Y%m%d%H%M")
+                    if m else None)
+    else:
+        return np.array([], dtype="datetime64[ns]")
+
+    fs = s3_filesystem()
+    found: list[np.datetime64] = []
+    day = start.date()
+    while day <= end.date():
+        d = datetime(day.year, day.month, day.day)
+        for key in fs.glob(pattern(d)):
+            t = parse(key)
+            if t is not None and start <= t <= end:
+                found.append(np.datetime64(t, "ns"))
+        day += timedelta(days=1)
+    return np.unique(np.array(found, dtype="datetime64[ns]"))
+
+
+def satellite_available_times(
+    sat_id: str, band: str, start: datetime, end: datetime,
+    product: str = "ABI-L1b-RadF",
+    include_s3_fallback: bool = True,
+) -> np.ndarray:
+    """Sorted scan times available for ``sat_id`` within the window.
+
+    For the icechunk-backed satellites this is the union of the store's
+    coverage and, unless disabled, the public-S3 L1b the readers fall
+    back to — so the filter does not reject times the pipeline could
+    actually load.
+    """
+    if "goes" in sat_id:
+        times = _goes_available_times(sat_id, band, start, end, product)
+        logger.info("  %s: %d scans available (S3)", sat_id, len(times))
+        return times
+
+    store = _icechunk_available_times(sat_id, band, start, end)
+    if not include_s3_fallback or "mtg" in sat_id or "msg" in sat_id:
+        logger.info("  %s: %d scans available (icechunk)", sat_id, len(store))
+        return store
+
+    s3 = _s3_l1b_times(sat_id, band, start, end)
+    times = np.unique(np.concatenate([store, s3])) if s3.size else store
+    logger.info("  %s: %d scans available (%d icechunk, %d public S3)",
+                sat_id, len(times), len(store), len(s3))
+    return times
+
+
+def _has_scan_near(times: np.ndarray, target: datetime, tol: timedelta) -> bool:
+    """True if ``times`` (sorted) holds a scan within ``tol`` of ``target``.
+
+    Instruments do not share a slot convention — AMI stamps scans at
+    HH:09:35, ABI full disk at HH:00:00 — and the readers snap to the
+    nearest scan, so availability is a tolerance test, not equality.
+    """
+    if times.size == 0:
+        return False
+    t64 = np.datetime64(target, "ns")
+    i = int(np.searchsorted(times, t64))
+    tol64 = np.timedelta64(int(tol.total_seconds()), "s").astype("timedelta64[ns]")
+    for j in (i - 1, i):
+        if 0 <= j < times.size and abs(times[j] - t64) <= tol64:
+            return True
+    return False
+
+
+def filter_to_common_times(
+    times: list[datetime],
+    sats: list[str],
+    flow_bands: list[str],
+    rad_bands: list[str],
+    dt_min: int | None = None,
+    tolerance_min: float = 5.0,
+    product: str = "ABI-L1b-RadF",
+) -> list[datetime]:
+    """Keep only timestamps every satellite can deliver a full triplet for.
+
+    Each retrieval needs three frames per satellite (t-dt, t, t+dt), so a
+    timestamp survives only when every satellite has a scan within
+    ``tolerance_min`` of all three.  ``dt`` is the satellite's own repeat
+    cycle unless ``dt_min`` overrides it, since SEVIRI's is 15 minutes
+    where the rest of the ring scans every 10.
+    """
+    if not times or not sats:
+        return list(times)
+
+    offsets = {sat_id: timedelta(minutes=dt_min if dt_min is not None
+                                 else scan_interval(sat_id))
+               for sat_id in sats}
+    tol = timedelta(minutes=tolerance_min)
+    widest = max(offsets.values())
+    window_start = times[0] - widest - tol
+    window_end = times[-1] + widest + tol
+
+    logger.info("Scanning availability for %d satellite(s) over %s .. %s",
+                len(sats), window_start, window_end)
+
+    available: dict[str, np.ndarray] = {}
+    for sat_id in sats:
+        band = availability_band(sat_id, flow_bands, rad_bands)
+        if band is None:
+            raise RuntimeError(
+                f"{sat_id} carries none of the requested bands "
+                f"(flow={flow_bands}, rad={rad_bands})"
+            )
+        available[sat_id] = satellite_available_times(
+            sat_id, band, window_start, window_end, product,
+        )
+
+    keep: list[datetime] = []
+    missing: dict[str, int] = {sat_id: 0 for sat_id in sats}
+    for t in times:
+        absent = [
+            sat_id for sat_id in sats
+            if not all(_has_scan_near(available[sat_id], w, tol)
+                       for w in (t - offsets[sat_id], t, t + offsets[sat_id]))
+        ]
+        for sat_id in absent:
+            missing[sat_id] += 1
+        if not absent:
+            keep.append(t)
+
+    dropped = len(times) - len(keep)
+    logger.info("Common-time filter: keeping %d of %d timestamps (%d dropped)",
+                len(keep), len(times), dropped)
+    for sat_id, count in sorted(missing.items(), key=lambda kv: -kv[1]):
+        if count:
+            logger.info("  %s lacked a full triplet at %d timestamp(s)",
+                        sat_id, count)
+    return keep
 
 
 # ---------------------------------------------------------------------------
@@ -128,66 +533,94 @@ def _band_available(sat_id: str, band: str) -> bool:
         from stereo_winds.config import ABI_TO_FCI_BAND
         from stereo_winds.readers.mtg import _BAND_RESOLUTION
         return band in _BAND_RESOLUTION or band in ABI_TO_FCI_BAND
+    if "msg" in sat_id:
+        # SEVIRI has eleven narrow channels against ABI's sixteen, so
+        # C04 (1.4 µm cirrus) and C06 (2.2 µm) have no counterpart.
+        from stereo_winds.readers.msg import ABI_TO_SEVIRI, _BAND_RESOLUTION
+        return band in _BAND_RESOLUTION or band in ABI_TO_SEVIRI
     return True
 
 
 def _build_input_stack(
     sat_id: str,
-    sat: SatelliteConfig,
     t0: datetime,
     disp: StereoDisparity,
     flow_bands: list[str],
     rad_bands: list[str],
     rad_time_frames: int = 1,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, SatelliteConfig]:
     """Build the (C, H, W) flow/rad/geom input stack from icechunk data.
 
     Bands that have no spectral equivalent on the target satellite are
     filled with NaN (and masked out in the finite_mask), keeping the
     channel count consistent with the trained student checkpoint.
 
-    Returns (flow_arr, rad_arr, geom_arr, finite_mask).
+    The geometry channels (pixel scale, satellite zenith) are derived
+    from the projection metadata of the scenes actually loaded, so a
+    drifted or relocated satellite is navigated where it really is.
+
+    Returns (flow_arr, rad_arr, geom_arr, finite_mask, scene_config).
     """
-    H, W = sat.n_rows, sat.n_cols
-    flow_chans: list[np.ndarray] = []
+    # Placeholder for channels of bands this satellite does not carry;
+    # they become zeros once a loaded scene has established the shape.
+    MISSING = None
+    flow_chans: list[np.ndarray | None] = []
     cached: dict[str, tuple] = {}  # band -> (a_m, a_0, a_p, valid)
+    scene_cfg: SatelliteConfig | None = None
 
     logger.info("  Loading flow bands: %s", flow_bands)
     for band in flow_bands:
         if not _band_available(sat_id, band):
             logger.warning("  Band %s unavailable on %s — filling with zeros", band, sat_id)
-            zero = np.zeros((H, W), dtype=np.float32)
-            flow_chans += [zero, zero.copy(), zero.copy(), zero.copy()]
+            flow_chans += [MISSING] * 4
             continue
-        a_m, a_0, a_p = _load_three_frames(sat_id, band, t0)
+        a_m, a_0, a_p, cfg, dt_used = _load_three_frames(sat_id, band, t0)
+        if scene_cfg is None:
+            scene_cfg = cfg
+        else:
+            _check_same_grid(scene_cfg, cfg, f"{sat_id} {band}")
         valid = np.isfinite(a_m) & np.isfinite(a_0) & np.isfinite(a_p)
         fb = disp._run_pair(a_0, a_m)
         ff = disp._run_pair(a_0, a_p)
+        # The student reads displacement over DT_MINUTES.  A satellite
+        # that scans on a longer cycle (SEVIRI's 15 min) produces
+        # proportionally larger displacements for the same wind, so
+        # rescale to the nominal interval rather than inflating speeds.
+        if dt_used != DT_MINUTES:
+            scale = DT_MINUTES / dt_used
+            logger.info("  %s: %d min pair scaled by %.3f to the %d min "
+                        "interval the student expects",
+                        sat_id, dt_used, scale, DT_MINUTES)
+            fb *= scale
+            ff *= scale
         for fl in (fb, ff):
             fl[:, ~valid] = np.nan
         flow_chans += [fb[0], fb[1], ff[0], ff[1]]
         cached[band] = (a_m, a_0, a_p, valid)
 
-    rad_chans: list[np.ndarray] = []
+    rad_chans: list[np.ndarray | None] = []
     logger.info("  Loading rad bands: %s", rad_bands)
     for band in rad_bands:
+        n_frames = 3 if rad_time_frames == 3 else 1
         if not _band_available(sat_id, band):
             logger.warning("  Band %s unavailable on %s — filling with zeros", band, sat_id)
-            n_frames = rad_time_frames if rad_time_frames == 3 else 1
-            for _ in range(n_frames):
-                rad_chans.append(np.zeros((H, W), dtype=np.float32))
+            rad_chans += [MISSING] * n_frames
             continue
 
         if band in cached:
             a_m, a_0, a_p, vb = cached[band]
         else:
             if rad_time_frames == 3:
-                a_m, a_0, a_p = _load_three_frames(sat_id, band, t0)
+                a_m, a_0, a_p, cfg, _ = _load_three_frames(sat_id, band, t0)
                 vb = np.isfinite(a_m) & np.isfinite(a_0) & np.isfinite(a_p)
             else:
-                a_0 = _load_scene(sat_id, band, t0)
+                a_0, cfg = _load_scene(sat_id, band, t0)
                 vb = np.isfinite(a_0)
                 a_m = a_p = None
+            if scene_cfg is None:
+                scene_cfg = cfg
+            else:
+                _check_same_grid(scene_cfg, cfg, f"{sat_id} {band}")
 
         if rad_time_frames == 3:
             for frame in (a_m, a_0, a_p):
@@ -199,8 +632,19 @@ def _build_input_stack(
             r[~vb] = np.nan
             rad_chans.append(r)
 
-    dx_m, dy_m = compute_pixel_scale(sat)
-    zen = compute_grid_zenith(sat)
+    if scene_cfg is None:
+        raise RuntimeError(
+            f"{sat_id}: none of the requested bands are available "
+            f"(flow={flow_bands}, rad={rad_bands}) — nothing to navigate from"
+        )
+
+    H, W = scene_cfg.n_rows, scene_cfg.n_cols
+    zero = np.zeros((H, W), dtype=np.float32)
+    flow_chans = [zero if c is MISSING else c for c in flow_chans]
+    rad_chans = [zero if c is MISSING else c for c in rad_chans]
+
+    dx_m, dy_m = compute_pixel_scale(scene_cfg)
+    zen = compute_grid_zenith(scene_cfg)
 
     flow_arr = np.stack(flow_chans, 0).astype(np.float32) / FLOW_SCALE
     rad_arr = np.stack(rad_chans, 0).astype(np.float32)
@@ -208,7 +652,8 @@ def _build_input_stack(
         [dx_m / PIXEL_SCALE_NORM, dy_m / PIXEL_SCALE_NORM, zen / ZENITH_NORM], 0,
     ).astype(np.float32)
     finite_mask = np.isfinite(flow_arr).all(0) & np.isfinite(rad_arr).all(0)
-    return np.nan_to_num(flow_arr), np.nan_to_num(rad_arr), np.nan_to_num(geom_arr), finite_mask
+    return (np.nan_to_num(flow_arr), np.nan_to_num(rad_arr),
+            np.nan_to_num(geom_arr), finite_mask, scene_cfg)
 
 
 # ---------------------------------------------------------------------------
@@ -293,14 +738,28 @@ def infer_satellite(
     The dataset has dimensions (y, x) with lat/lon coordinate arrays
     and the standard AMV variables.
     """
-    sat = SATELLITE_CONFIGS[sat_id]
-    logger.info("Processing %s (sub_lon=%.1f°)", sat_id, sat.sub_lon_deg)
+    nominal = SATELLITE_CONFIGS[sat_id]
+    logger.info("Processing %s (nominal sub_lon=%.1f°)",
+                sat_id, nominal.sub_lon_deg)
 
     rad_tf = int(getattr(model, "rad_time_frames", 1))
-    flow_arr, rad_arr, geom_arr, finite_mask = _build_input_stack(
-        sat_id, sat, t0, disp, flow_bands, rad_bands,
+    flow_arr, rad_arr, geom_arr, finite_mask, sat = _build_input_stack(
+        sat_id, t0, disp, flow_bands, rad_bands,
         rad_time_frames=rad_tf,
     )
+
+    # Navigate with what the data says, and say so when it disagrees with
+    # the nominal slot — that is a drift or a relocation, not an error.
+    drift = sat.sub_lon_deg - nominal.sub_lon_deg
+    if abs(drift) > SUB_LON_TOL_DEG:
+        logger.warning(
+            "  %s: scene sub_lon=%.4f° differs from the nominal %.4f° "
+            "by %.4f° — navigating with the value from the data",
+            sat_id, sat.sub_lon_deg, nominal.sub_lon_deg, drift,
+        )
+    else:
+        logger.info("  %s: scene sub_lon=%.4f° (height %.0f m)",
+                    sat_id, sat.sub_lon_deg, sat.satellite_height_m)
 
     logger.info("  Forward pass (%dx%d)...", sat.n_rows, sat.n_cols)
     raw = _forward_full_disk(model, flow_arr, rad_arr, geom_arr,
@@ -321,6 +780,9 @@ def infer_satellite(
         attrs={
             "satellite_id": sat_id,
             "sub_satellite_longitude": sat.sub_lon_deg,
+            "sub_satellite_longitude_source": "scene projection metadata",
+            "nominal_sub_satellite_longitude": nominal.sub_lon_deg,
+            "satellite_height_m": sat.satellite_height_m,
             "time": str(t0),
             "source": "student_amv",
         },
@@ -423,8 +885,239 @@ def merge_global(
 
 
 # ---------------------------------------------------------------------------
+# Icechunk output (optional): append the global mosaic along a time axis
+# ---------------------------------------------------------------------------
+
+# Pin the time encoding on creation.  Without this xarray picks units from
+# the first timestamp ("days since <t0>") and later appends re-encode
+# against a different unit, silently corrupting every appended timestamp.
+_TIME_ENCODING = {
+    "units": "seconds since 1970-01-01T00:00:00",
+    "calendar": "proleptic_gregorian",
+    "dtype": "int64",
+}
+
+
+def icechunk_storage(
+    uri: str,
+    endpoint_url: str | None = None,
+    region: str | None = None,
+    anonymous: bool = False,
+    force_path_style: bool = False,
+):
+    """Build icechunk Storage for ``s3://bucket/prefix`` or a local path."""
+    import icechunk
+
+    parsed = urlparse(uri)
+    if parsed.scheme in ("s3", "s3a"):
+        return icechunk.s3_storage(
+            bucket=parsed.netloc,
+            prefix=parsed.path.lstrip("/") or None,
+            region=region,
+            endpoint_url=endpoint_url,
+            anonymous=True if anonymous else None,
+            from_env=None if anonymous else True,
+            force_path_style=force_path_style,
+        )
+    if parsed.scheme in ("", "file"):
+        path = Path(parsed.path if parsed.scheme == "file" else uri)
+        path.mkdir(parents=True, exist_ok=True)
+        return icechunk.local_filesystem_storage(str(path))
+    raise ValueError(
+        f"Unsupported icechunk store URI {uri!r} — use s3://bucket/prefix "
+        f"or a local directory path"
+    )
+
+
+def open_icechunk_repo(uri: str, **storage_kwargs):
+    """Open the icechunk repository at ``uri``, creating it if absent."""
+    import icechunk
+
+    storage = icechunk_storage(uri, **storage_kwargs)
+    repo = icechunk.Repository.open_or_create(storage)
+    logger.info("Icechunk store ready: %s", uri)
+    return repo
+
+
+def icechunk_existing_times(repo, branch: str = "main") -> set[datetime]:
+    """Timestamps already committed to the store (empty if it is new)."""
+    try:
+        ds = xr.open_zarr(repo.readonly_session(branch).store, consolidated=False)
+    except Exception:
+        logger.info("Icechunk store has no dataset yet — starting fresh")
+        return set()
+    if "time" not in ds.coords:
+        return set()
+    times = {pd.Timestamp(v).to_pydatetime() for v in ds["time"].values}
+    logger.info("Icechunk store already holds %d timestamp(s)", len(times))
+    return times
+
+
+def _mosaic_with_time(ds_global: xr.Dataset, t0: datetime) -> xr.Dataset:
+    """Add a length-1 time dimension so the mosaic can be appended."""
+    ds = ds_global.expand_dims(time=[np.datetime64(t0, "ns")])
+    # Attributes that vary per timestamp belong on the variable, not the
+    # store; keep only what is invariant across the whole time series.
+    ds.attrs = {k: v for k, v in ds_global.attrs.items()
+                if k not in ("time", "satellites")}
+    ds.attrs["satellites"] = ",".join(ds_global.attrs.get("satellites", []))
+    return ds
+
+
+def _store_has_dataset(session) -> bool:
+    """True if the store already holds a time-dimensioned dataset."""
+    try:
+        ds = xr.open_zarr(session.store, consolidated=False)
+    except Exception:
+        return False
+    return "time" in ds.coords
+
+
+def write_mosaic_to_icechunk(
+    repo,
+    ds_global: xr.Dataset,
+    t0: datetime,
+    branch: str = "main",
+    chunk: int = 1024,
+) -> None:
+    """Append one global mosaic to the icechunk store as a new commit."""
+    ds = _mosaic_with_time(ds_global, t0)
+    session = repo.writable_session(branch)
+
+    if not _store_has_dataset(session):
+        encoding: dict[str, dict] = {"time": dict(_TIME_ENCODING)}
+        for name, var in ds.data_vars.items():
+            encoding[name] = {
+                "chunks": (1, min(chunk, var.shape[1]), min(chunk, var.shape[2])),
+            }
+        ds.to_zarr(session.store, mode="w", consolidated=False,
+                   zarr_format=3, encoding=encoding)
+        logger.info("Created icechunk dataset (chunks %d x %d)", chunk, chunk)
+    else:
+        ds.to_zarr(session.store, mode="a-", append_dim="time",
+                   consolidated=False)
+
+    commit = session.commit(f"student AMV global mosaic {time_tag(t0)}")
+    logger.info("Committed %s to icechunk (%s)", time_tag(t0), commit)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
+
+def process_time(
+    t0: datetime,
+    sats: list[str],
+    model: StudentWindsModel,
+    disp: StereoDisparity,
+    flow_bands: list[str],
+    rad_bands: list[str],
+    out_dir: Path,
+    device: str = "cuda",
+    row_strip: int = 1024,
+    resolution_m: float = 2000.0,
+    skip_global: bool = False,
+    skip_existing: bool = False,
+    repo=None,
+    icechunk_branch: str = "main",
+    icechunk_chunk: int = 1024,
+    icechunk_times: set[datetime] | None = None,
+    write_netcdf: bool = True,
+) -> bool:
+    """Run the full ring for a single timestamp and write its output.
+
+    Output goes to per-day NetCDF files and, when ``repo`` is given, is
+    also appended to an icechunk store as a new commit.
+
+    Returns True if output exists for this timestamp when the call ends
+    (either newly written or already present under ``--skip-existing``).
+    """
+    tag = time_tag(t0)
+    step_dir = day_dir(out_dir, t0)
+    icechunk_times = icechunk_times if icechunk_times is not None else set()
+
+    if skip_existing and not skip_global:
+        # Done only when every configured sink already holds this timestamp.
+        sinks = []
+        if write_netcdf:
+            sinks.append(("netcdf", global_nc_path(out_dir, t0).exists()))
+        if repo is not None:
+            sinks.append(("icechunk", t0 in icechunk_times))
+        if sinks and all(present for _, present in sinks):
+            logger.info("[%s] already in %s — skipping", tag,
+                        " and ".join(name for name, _ in sinks))
+            return True
+
+    if write_netcdf:
+        step_dir.mkdir(parents=True, exist_ok=True)
+
+    per_sat: dict[str, xr.Dataset] = {}
+    for sat_id in sats:
+        if sat_id not in SATELLITE_CONFIGS:
+            logger.warning("Unknown satellite %r, skipping", sat_id)
+            continue
+        nc_path = sat_nc_path(out_dir, sat_id, t0)
+        if skip_existing and write_netcdf and nc_path.exists():
+            logger.info("[%s] %s already exists — reusing %s",
+                        tag, sat_id, nc_path)
+            try:
+                per_sat[sat_id] = xr.load_dataset(nc_path)
+                continue
+            except Exception:
+                logger.exception("Failed to read %s — recomputing", nc_path)
+        try:
+            ds = infer_satellite(
+                sat_id, t0, model, disp,
+                flow_bands, rad_bands,
+                device=device, row_strip=row_strip,
+            )
+            if write_netcdf:
+                ds.to_netcdf(nc_path)
+                logger.info("Saved %s", nc_path)
+            per_sat[sat_id] = ds
+        except Exception:
+            logger.exception("[%s] Failed to process %s — skipping", tag, sat_id)
+
+    if not per_sat:
+        logger.error("[%s] No satellites produced output.", tag)
+        return False
+
+    logger.info("[%s] Completed %d/%d satellites: %s",
+                tag, len(per_sat), len(sats), list(per_sat.keys()))
+
+    if not skip_global:
+        logger.info("[%s] Building global mosaic (%.0f m grid)...",
+                    tag, resolution_m)
+        ds_global = merge_global(per_sat, resolution_m=resolution_m)
+
+        if write_netcdf:
+            global_path = global_nc_path(out_dir, t0)
+            ds_global.to_netcdf(global_path)
+            logger.info("Saved global mosaic: %s", global_path)
+
+        if repo is not None:
+            if t0 in icechunk_times:
+                logger.warning(
+                    "[%s] already in the icechunk store — not appending a "
+                    "duplicate (use --skip-existing to skip it entirely)", tag)
+            else:
+                write_mosaic_to_icechunk(
+                    repo, ds_global, t0,
+                    branch=icechunk_branch, chunk=icechunk_chunk,
+                )
+                icechunk_times.add(t0)
+
+        # Summary stats
+        valid = ds_global["quality_flag"].values >= 2
+        n_valid = int(valid.sum())
+        n_total = valid.size
+        logger.info("[%s] Global mosaic: %d / %d grid cells with valid AMVs "
+                    "(%.1f%%)", tag, n_valid, n_total,
+                    100 * n_valid / n_total if n_total else 0)
+
+    return True
+
 
 def main():
     logging.basicConfig(
@@ -437,13 +1130,21 @@ def main():
         description="Global geostationary ring student AMV inference",
     )
     ap.add_argument("--time", required=True,
-                    help="ISO timestamp (e.g. 2025-03-10T12:00)")
+                    help="ISO timestamp, or the start of the range when "
+                         "--end-time is given (e.g. 2025-03-10T12:00)")
+    ap.add_argument("--end-time", default=None,
+                    help="ISO timestamp ending the range (inclusive). "
+                         "Omit to process only --time.")
+    ap.add_argument("--step-minutes", type=int, default=DT_MINUTES,
+                    help=f"Spacing between timestamps in a range "
+                         f"(default {DT_MINUTES})")
     ap.add_argument("--student-ckpt", required=True,
                     help="Student Lightning checkpoint")
     ap.add_argument("--raft-ckpt", required=True,
                     help="RAFT optical-flow checkpoint")
     ap.add_argument("--output-dir", default="output/global_ring",
-                    help="Output directory for NetCDF files")
+                    help="Output directory; files land in "
+                         "<output-dir>/<YYYYMMDD>/ with timestamped names")
     ap.add_argument("--device", default="cuda",
                     choices=["cuda", "cpu"])
     ap.add_argument("--satellites", default=None,
@@ -459,9 +1160,56 @@ def main():
                     help="Row strip height for tiled inference")
     ap.add_argument("--skip-global", action="store_true",
                     help="Skip the global mosaic, only produce per-satellite files")
+    ap.add_argument("--require-all-satellites", action="store_true",
+                    help="Before processing, list each satellite's scan "
+                         "times and keep only the timestamps where every "
+                         "satellite can supply a full t-dt/t/t+dt triplet")
+    ap.add_argument("--availability-tolerance", type=float, default=5.0,
+                    help="How close a scan must be to count as covering a "
+                         "frame, in minutes (default 5)")
+    ap.add_argument("--skip-existing", action="store_true",
+                    help="Skip timestamps whose output already exists in "
+                         "every configured sink (resume an interrupted range)")
+
+    ic = ap.add_argument_group("icechunk output")
+    ic.add_argument("--icechunk-store", default=None,
+                    help="Write the global mosaic to this icechunk store, "
+                         "appending along time: s3://bucket/prefix (or a "
+                         "local directory path)")
+    ic.add_argument("--icechunk-branch", default="main",
+                    help="Branch to commit to (default: main)")
+    ic.add_argument("--icechunk-chunk", type=int, default=1024,
+                    help="Spatial chunk size for icechunk arrays (default 1024)")
+    ic.add_argument("--icechunk-endpoint", default=None,
+                    help="S3 endpoint URL for non-AWS stores "
+                         "(e.g. https://data.source.coop)")
+    ic.add_argument("--icechunk-region", default=None,
+                    help="S3 region")
+    ic.add_argument("--icechunk-anonymous", action="store_true",
+                    help="Access the store anonymously (read-only; writes "
+                         "need credentials from the environment)")
+    ic.add_argument("--icechunk-force-path-style", action="store_true",
+                    help="Use path-style S3 addressing (needed by minio and "
+                         "source.coop)")
+    ic.add_argument("--no-netcdf", action="store_true",
+                    help="Write only to the icechunk store, skipping the "
+                         "per-day NetCDF files")
     args = ap.parse_args()
 
-    t0 = datetime.fromisoformat(args.time)
+    if args.no_netcdf and not args.icechunk_store:
+        ap.error("--no-netcdf requires --icechunk-store; otherwise nothing "
+                 "would be written")
+    if args.icechunk_store and args.skip_global:
+        ap.error("--icechunk-store writes the global mosaic, which "
+                 "--skip-global disables")
+
+    t_start = datetime.fromisoformat(args.time)
+    t_end = datetime.fromisoformat(args.end_time) if args.end_time else None
+    try:
+        times = time_steps(t_start, t_end, args.step_minutes)
+    except ValueError as exc:
+        ap.error(str(exc))
+
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -470,7 +1218,47 @@ def main():
     flow_bands = [b for b in args.flow_bands.split(",") if b]
     rad_bands = [b for b in args.rad_bands.split(",") if b]
 
-    # Load models
+    logger.info("Processing %d timestamp(s): %s%s",
+                len(times), time_tag(times[0]),
+                f" .. {time_tag(times[-1])} every {args.step_minutes} min"
+                if len(times) > 1 else "")
+
+    if args.require_all_satellites:
+        try:
+            times = filter_to_common_times(
+                times, sats, flow_bands, rad_bands,
+                # triplet offsets come from each satellite's own cadence
+                tolerance_min=args.availability_tolerance,
+            )
+        except Exception:
+            logger.exception("Availability scan failed — cannot determine "
+                             "which timestamps every satellite covers")
+            sys.exit(1)
+        if not times:
+            logger.error("No timestamp in the range has data from all of: %s",
+                         ", ".join(sats))
+            sys.exit(1)
+
+    # Optional icechunk sink, and the timestamps it already holds (resume)
+    repo = None
+    icechunk_times: set[datetime] = set()
+    if args.icechunk_store:
+        repo = open_icechunk_repo(
+            args.icechunk_store,
+            endpoint_url=args.icechunk_endpoint,
+            region=args.icechunk_region,
+            anonymous=args.icechunk_anonymous,
+            force_path_style=args.icechunk_force_path_style,
+        )
+        icechunk_times = icechunk_existing_times(repo, args.icechunk_branch)
+        if icechunk_times and not args.skip_existing:
+            logger.warning(
+                "Store already holds %d timestamp(s) and --skip-existing was "
+                "not given; timestamps already present will not be appended "
+                "again", len(icechunk_times),
+            )
+
+    # Load models once and reuse across the whole range
     logger.info("Loading student checkpoint: %s", args.student_ckpt)
     model = StudentWindsModel.load_from_checkpoint(
         args.student_ckpt, map_location=args.device,
@@ -483,51 +1271,43 @@ def main():
         device=args.device,
     )
 
-    # Per-satellite inference
-    per_sat: dict[str, xr.Dataset] = {}
-    for sat_id in sats:
-        if sat_id not in SATELLITE_CONFIGS:
-            logger.warning("Unknown satellite %r, skipping", sat_id)
-            continue
+    n_ok = 0
+    failed: list[str] = []
+    for i, t0 in enumerate(times, 1):
+        logger.info("=== [%d/%d] %s ===", i, len(times), t0.isoformat())
         try:
-            ds = infer_satellite(
-                sat_id, t0, model, disp,
-                flow_bands, rad_bands,
-                device=args.device, row_strip=args.row_strip,
+            ok = process_time(
+                t0, sats, model, disp, flow_bands, rad_bands, out_dir,
+                device=args.device,
+                row_strip=args.row_strip,
+                resolution_m=args.resolution_m,
+                skip_global=args.skip_global,
+                skip_existing=args.skip_existing,
+                repo=repo,
+                icechunk_branch=args.icechunk_branch,
+                icechunk_chunk=args.icechunk_chunk,
+                icechunk_times=icechunk_times,
+                write_netcdf=not args.no_netcdf,
             )
-            # Save per-satellite file
-            tag = t0.strftime("%Y%m%dT%H%M")
-            nc_path = out_dir / f"student_amv_{sat_id}_{tag}.nc"
-            ds.to_netcdf(nc_path)
-            logger.info("Saved %s", nc_path)
-            per_sat[sat_id] = ds
         except Exception:
-            logger.exception("Failed to process %s — skipping", sat_id)
+            logger.exception("Failed to process %s — continuing", t0.isoformat())
+            ok = False
+        if ok:
+            n_ok += 1
+        else:
+            failed.append(t0.isoformat())
 
-    if not per_sat:
-        logger.error("No satellites produced output. Exiting.")
+    where = args.icechunk_store if args.no_netcdf else str(out_dir)
+    if args.icechunk_store and not args.no_netcdf:
+        where = f"{out_dir} and {args.icechunk_store}"
+    logger.info("Done: %d/%d timestamps produced output in %s",
+                n_ok, len(times), where)
+    if failed:
+        logger.warning("Failed timestamps (%d): %s", len(failed),
+                       ", ".join(failed))
+    if n_ok == 0:
+        logger.error("No timestamps produced output. Exiting.")
         sys.exit(1)
-
-    logger.info("Completed %d/%d satellites: %s",
-                len(per_sat), len(sats), list(per_sat.keys()))
-
-    # Global mosaic
-    if not args.skip_global and len(per_sat) > 0:
-        logger.info("Building global mosaic (%.0f m grid)...", args.resolution_m)
-        ds_global = merge_global(per_sat, resolution_m=args.resolution_m)
-        tag = t0.strftime("%Y%m%dT%H%M")
-        global_path = out_dir / f"student_amv_global_{tag}.nc"
-        ds_global.to_netcdf(global_path)
-        logger.info("Saved global mosaic: %s", global_path)
-
-        # Summary stats
-        valid = ds_global["quality_flag"].values >= 2
-        n_valid = int(valid.sum())
-        n_total = valid.size
-        logger.info("Global mosaic: %d / %d grid cells with valid AMVs (%.1f%%)",
-                     n_valid, n_total, 100 * n_valid / n_total if n_total else 0)
-
-    logger.info("Done.")
 
 
 if __name__ == "__main__":

@@ -181,7 +181,7 @@ class TestMTGSmoke:
 
     def test_load_ir105_2km(self):
         m = MTG(satellite="mtg-i1", bands=["ir_105"])
-        ds = m.data_at_time(dt.datetime(2024, 6, 15, 12, 0))
+        ds = m.data_at_time(dt.datetime(2025, 7, 15, 12, 0))
         rad = ds["Rad"]
         assert rad.dims == ("time", "band", "y", "x")
         assert rad.shape[0] == 1 and rad.shape[1] == 1
@@ -195,11 +195,11 @@ class TestMTGSmoke:
 
     def test_abi_band_name_accepted(self):
         m = MTG(bands=["C13"])
-        ds = m.data_at_time(dt.datetime(2024, 6, 15, 12, 0))
+        ds = m.data_at_time(dt.datetime(2025, 7, 15, 12, 0))
         assert ds["Rad"].shape[2] > 0
 
     def test_data_has_valid_values(self):
         m = MTG(bands=["ir_105"])
-        ds = m.data_at_time(dt.datetime(2024, 6, 15, 12, 0))
+        ds = m.data_at_time(dt.datetime(2025, 7, 15, 12, 0))
         data = ds["Rad"].values[0, 0]
         assert np.isfinite(data).sum() > 0

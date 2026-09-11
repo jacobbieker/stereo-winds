@@ -1,17 +1,21 @@
 """Icechunk-backed GK-2A AMI reader for stereo-winds.
 
-Reads GK-2A (GEO-KOMPSAT-2A) AMI Level-1b radiance from icechunk stores
-hosted at source.coop and returns a dataset shaped exactly like the GOES
-reader: ``Rad`` as ``(time, band, y, x)`` oriented south->north, ``x``/``y``
-in **meters** (scan angle x perspective height), and
-``Rad.attrs["orbital_parameters"]`` carrying ``projection_altitude`` and
-``satellite_nominal_longitude``.
+Reads GK-2A AMI Level-1b radiance from icechunk stores hosted at
+source.coop and returns a dataset shaped exactly like the GOES reader:
+``Rad`` as ``(time, band, y, x)`` oriented south->north, ``x``/``y`` in
+**meters** (scan angle x perspective height), and
+``Rad.attrs["orbital_parameters"]`` carrying the projection recorded for
+the scene.  The shared mechanics live in
+:class:`stereo_winds.readers._geos_store.GeoStoreReader`.
 
 Icechunk stores
 ---------------
-- ``geo/gk2a_500m.icechunk``  -- AMI high-res VIS bands (500 m)
-- ``geo/gk2a_1000m.icechunk`` -- AMI mid-res VIS/NIR bands (1 km)
-- ``geo/gk2a_2000m.icechunk`` -- AMI IR/WV bands (2 km)
+- ``geo/gk2a_500m.icechunk``  — AMI band VI006          (500 m VIS)
+- ``geo/gk2a_1000m.icechunk`` — AMI bands VI004-VI008   (1 km VIS)
+- ``geo/gk2a_2000m.icechunk`` — AMI bands NR013-IR133   (2 km NIR/IR)
+
+Outside the stores' coverage the native AMI L1b netCDFs are read from
+NOAA's public bucket (``s3://noaa-gk2a-pds``) with satpy instead.
 
 Requires ``icechunk`` and ``zarr>=3``.
 """
@@ -19,10 +23,15 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
-from typing import Any
 
-import numpy as np
 import xarray as xr
+
+from stereo_winds.readers._geos_store import GeoStoreReader
+from stereo_winds.readers._satpy_s3 import (
+    download_keys,
+    load_scene_array,
+    scene_to_rad,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,230 +85,105 @@ _ABI_TO_AMI: dict[str, str] = {
 _BUCKET = "bkr"
 _ENDPOINT = "https://data.source.coop"
 
-
-def _open_store(prefix: str) -> Any:
-    """Open an icechunk store in read-only mode."""
-    import icechunk
-
-    storage = icechunk.s3_storage(
-        bucket=_BUCKET,
-        prefix=prefix,
-        endpoint_url=_ENDPOINT,
-        anonymous=True,
-        force_path_style=True,
-    )
-    repo = icechunk.Repository.open(storage)
-    return repo.readonly_session("main").store
+# Public NOAA bucket holding the native AMI L1b files, used when the
+# icechunk store does not cover the requested time.
+_S3_BUCKET = "noaa-gk2a-pds"
+_S3_PREFIX = "AMI/L1B/FD"
+_FULL_DISK_MINUTES = 10          # AMI full-disk scan cadence
 
 
 def _resolve_band(band: str) -> str:
     """Accept either AMI-native (IR112) or ABI-style (C14) band names."""
-    if band in _BAND_RESOLUTION:
-        return band
-    ami = _ABI_TO_AMI.get(band)
-    if ami is not None:
-        return ami
-    raise ValueError(
-        f"Unknown band {band!r}. Use AMI names (VI004, IR112, ...) or ABI "
-        f"names (C01-C16). Known ABI->AMI map: {_ABI_TO_AMI}"
-    )
+    return GK2A.resolve_band(band)
 
 
-class GK2A:
+class GK2A(GeoStoreReader):
     """Icechunk-backed GK-2A AMI reader.
 
     Parameters
     ----------
     satellite : "gk2a"
     bands : list with a single AMI band, e.g. ``["IR112"]`` or ``["C14"]``
+    allow_s3_fallback : when the icechunk store has no scan near the
+        requested time, read the native AMI files from NOAA's public
+        bucket with satpy instead (default True)
+    cache_dir : where downloaded AMI files are kept
     """
+
+    instrument = "ami"
+    sweep = "y"
+    bucket = _BUCKET
+    endpoint = _ENDPOINT
+
+    sub_lon = {"gk2a": _SUB_LON}
+    sat_height = _SAT_HEIGHT
+
+    band_resolution = _BAND_RESOLUTION
+    abi_to_native = _ABI_TO_AMI
+    band_name_hint = (
+        "Use AMI names (VI004-IR133) or ABI names (C01-C16)."
+    )
+    default_band = "IR112"
+
+    store_template = "geo/gk2a_{resolution}.icechunk"
+    scan_interval_minutes = _FULL_DISK_MINUTES
+
+    coord_names = {
+        "x": ["x", "x_geostationary", "column", "longitude", "lon", "phgeo"],
+        "y": ["y", "y_geostationary", "row", "latitude", "lat", "thgeo"],
+    }
+    synth_scales = {5500: 5.6e-05, 11000: 2.8e-05, 22000: 1.4e-05}
+    default_synth_scale = 5.6e-05
+
+    supports_s3_fallback = True
 
     def __init__(
         self,
         satellite: str = "gk2a",
         bands: list[str] | None = None,
+        allow_s3_fallback: bool = True,
+        cache_dir: str | None = None,
     ) -> None:
-        self.satellite = satellite
-        if satellite != "gk2a":
-            raise ValueError(
-                f"Unknown satellite {satellite!r}. Only 'gk2a' is supported."
-            )
-        raw_bands = list(bands) if bands else ["IR112"]
-        self.bands = [_resolve_band(b) for b in raw_bands]
+        super().__init__(satellite, bands, allow_s3_fallback, cache_dir)
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # Public-S3 fallback (native AMI L1b via satpy)
     # ------------------------------------------------------------------
 
-    def _store_prefix(self, resolution: str) -> str:
-        return f"geo/gk2a_{resolution}.icechunk"
+    def s3_bucket_label(self) -> str:
+        return _S3_BUCKET
 
-    def _open_dataset(self, resolution: str) -> xr.Dataset:
-        """Open the icechunk store for the given resolution as xr.Dataset."""
-        prefix = self._store_prefix(resolution)
-        logger.info("Opening icechunk store %s/%s", _BUCKET, prefix)
-        store = _open_store(prefix)
-        ds = xr.open_zarr(store)
-        if "time" in ds.dims:
-            _, unique_idx = np.unique(ds["time"].values, return_index=True)
-            ds = ds.isel(time=np.sort(unique_idx)).sortby("time")
-        return ds
+    def _s3_keys(self, slot: dt.datetime, band: str) -> list[str]:
+        """AMI L1b key for one band at one slot.
 
-    def _select_time(
-        self, ds: xr.Dataset, t: dt.datetime,
-    ) -> xr.Dataset:
-        """Select the nearest time step to the requested datetime."""
-        target = np.datetime64(t.replace(tzinfo=None), "ns")
-        return ds.sel(time=target, method="nearest")
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
-    def data_at_time(self, t: dt.datetime, **_: Any) -> xr.Dataset:
-        """Return the AMI scene closest to time ``t`` for ``self.bands[0]``.
-
-        Returns
-        -------
-        xr.Dataset
-            Dataset with ``Rad`` DataArray shaped ``(1, 1, y, x)``,
-            y ascending (south -> north), x/y coordinates in **meters**
-            (scan angle * satellite height). ``Rad.attrs["orbital_parameters"]``
-            contains ``projection_altitude`` and ``satellite_nominal_longitude``.
-            ``ds.attrs["sweep_angle_axis"]`` is ``"y"`` (AMI convention).
+        The resolution tag (``fd020ge`` and friends) is globbed rather
+        than hardcoded, since it varies by channel.
         """
-        band = self.bands[0]
-        resolution = _BAND_RESOLUTION[band]
-        ds = self._open_dataset(resolution)
-
-        snap = self._select_time(ds, t)
-        rad_2d = self._extract_radiance(snap, band)
-        x_m, y_m_asc, rad_sn = self._build_coords(ds, rad_2d)
-
-        Rad = xr.DataArray(
-            rad_sn[None, None, :, :],
-            dims=("time", "band", "y", "x"),
-            coords={"x": ("x", x_m), "y": ("y", y_m_asc)},
-            name="Rad",
+        pattern = (
+            f"{_S3_BUCKET}/{_S3_PREFIX}/{slot:%Y%m}/{slot:%d}/{slot:%H}/"
+            f"gk2a_ami_le1b_{band.lower()}_fd*ge_{slot:%Y%m%d%H%M}.nc"
         )
-        Rad.attrs["orbital_parameters"] = {
-            "projection_altitude": _SAT_HEIGHT,
-            "satellite_nominal_longitude": _SUB_LON,
-            "projection_longitude": _SUB_LON,
-        }
+        return sorted(self.fs.glob(pattern))
 
-        actual_time = None
-        if "time" in ds.coords:
-            sel_time = snap["time"].values if "time" in snap.coords else None
-            if sel_time is not None:
-                actual_time = str(np.datetime_as_string(
-                    np.datetime64(sel_time, "ns"), unit="s",
-                ))
-        if actual_time:
-            Rad.attrs["time_coverage_start"] = actual_time
-            Rad.attrs["time_coverage_end"] = actual_time
-
-        out = xr.Dataset({"Rad": Rad})
-        out.attrs["sweep_angle_axis"] = "y"
-        return out
-
-    # ------------------------------------------------------------------
-    # Radiance extraction (flexible to different store layouts)
-    # ------------------------------------------------------------------
-
-    def _extract_radiance(
-        self, snap: xr.Dataset, band: str,
-    ) -> np.ndarray:
-        """Extract a 2-D (y, x) radiance array from the time-selected slice."""
-        if band in snap.data_vars:
-            arr = snap[band].values
-            if arr.ndim == 2:
-                return arr.astype(np.float32)
-            return arr.squeeze().astype(np.float32)
-
-        for vname in ("Rad", "radiance", "rad", "toa_brightness_temperature"):
-            if vname in snap.data_vars:
-                da = snap[vname]
-                if "band" in da.dims:
-                    if "band" in da.coords:
-                        band_vals = da.coords["band"].values
-                        if band in band_vals:
-                            return da.sel(band=band).values.astype(np.float32)
-                    return da.isel(band=0).values.astype(np.float32)
-                arr = da.values
-                if arr.ndim == 2:
-                    return arr.astype(np.float32)
-                return arr.squeeze().astype(np.float32)
-
-        for vname in snap.data_vars:
-            da = snap[vname]
-            if da.ndim >= 2:
-                arr = da.values
-                if arr.ndim == 2:
-                    return arr.astype(np.float32)
-                return arr.squeeze().astype(np.float32)
-
-        raise KeyError(
-            f"Cannot find radiance for band {band!r} in dataset. "
-            f"Variables: {list(snap.data_vars)}"
+    def _s3_data_at_time(self, t: dt.datetime, band: str) -> xr.Dataset:
+        """Read the scene from NOAA's public bucket via satpy."""
+        slot = self._snap_slot(t)
+        logger.info("Loading %s %s at %s from %s", self.satellite, band,
+                    slot, _S3_BUCKET)
+        keys = self._s3_keys(slot, band)
+        if not keys:
+            raise FileNotFoundError(
+                f"No AMI L1b file for {self.satellite} {band} at {slot} "
+                f"in s3://{_S3_BUCKET}"
+            )
+        paths = download_keys(
+            self.fs, keys[:1],
+            self.cache_dir / self.satellite / f"{slot:%Y%m%d_%H%M}",
         )
-
-    # ------------------------------------------------------------------
-    # Coordinate handling
-    # ------------------------------------------------------------------
-
-    def _build_coords(
-        self, ds: xr.Dataset, rad_2d: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Build x/y metre coordinates and ensure y-ascending radiance."""
-        ny, nx = rad_2d.shape
-        x_vals = self._get_coord(ds, "x", nx)
-        y_vals = self._get_coord(ds, "y", ny)
-
-        x_range = float(np.abs(x_vals[-1] - x_vals[0]))
-        if x_range < 1.0:
-            x_m = x_vals * _SAT_HEIGHT
-            y_m = y_vals * _SAT_HEIGHT
-        else:
-            x_m = x_vals
-            y_m = y_vals
-
-        if y_m[0] > y_m[-1]:
-            y_m = y_m[::-1]
-            rad_2d = rad_2d[::-1, :]
-
-        return x_m.astype(np.float64), y_m.astype(np.float64), rad_2d
-
-    def _get_coord(
-        self, ds: xr.Dataset, axis: str, expected_len: int,
-    ) -> np.ndarray:
-        """Retrieve the x or y coordinate array, synthesising if absent."""
-        if axis in ds.coords:
-            vals = ds.coords[axis].values.astype(np.float64)
-            if len(vals) == expected_len:
-                return vals
-
-        alt_names = {
-            "x": ["column", "longitude", "lon", "phgeo"],
-            "y": ["row", "latitude", "lat", "thgeo"],
-        }
-        for name in alt_names.get(axis, []):
-            if name in ds.coords:
-                vals = ds.coords[name].values.astype(np.float64)
-                if len(vals) == expected_len:
-                    return vals
-
-        _GRID_SCALE = {5500: 5.6e-05, 11000: 2.8e-05, 22000: 1.4e-05}
-        scale = _GRID_SCALE.get(expected_len, 5.6e-05)
-        logger.warning(
-            "No %s coordinate found in store; synthesising with "
-            "scale=%.2e rad/px (grid %d)", axis, scale, expected_len,
+        da = load_scene_array("ami_l1b", paths, band)
+        return scene_to_rad(
+            da, band, sweep=self.sweep,
+            fallback_sub_lon=self.nominal_sub_lon,
+            fallback_height=self.nominal_height,
+            label=f"{self.satellite} {band} (S3)",
         )
-        half = expected_len / 2.0
-        if axis == "x":
-            return (np.arange(expected_len) - half + 0.5) * scale
-        else:
-            return (half - 0.5 - np.arange(expected_len)) * scale
-
-    def __repr__(self) -> str:
-        return f"GK2A(satellite={self.satellite!r}, bands={self.bands!r})"

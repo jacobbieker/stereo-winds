@@ -89,7 +89,7 @@ include = ["stereo_winds*"]
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]
-platforms = ["osx-arm64"]
+platforms = ["osx-arm64", "linux-64"]
 
 [tool.pixi.pypi-dependencies]
 stereo-winds = { path = ".", editable = true }

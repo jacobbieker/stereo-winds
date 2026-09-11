@@ -118,6 +118,26 @@ MTG_I1_CONFIG = SatelliteConfig(
     n_cols=5568,
 )
 
+# MSG SEVIRI 3 km full disk (3712x3712).  The Indian Ocean Data Coverage
+# service sits at 45.5 deg E.  MSG navigates on its own ellipsoid, and
+# SEVIRI repeats every 15 minutes rather than 10 -- callers building
+# temporal pairs must use that cadence.  Fallbacks only; data_loading
+# derives the exact values from the store's projection metadata.
+MSG_IODC_CONFIG = SatelliteConfig(
+    satellite_id="msg-iodc",
+    sub_lon_deg=45.5,
+    satellite_height_m=35785831.0,
+    semi_major_m=6378169.0,
+    semi_minor_m=6356583.8,
+    sweep="y",  # Meteosat convention (only GOES ABI uses x-sweep)
+    scale_x=8.384332e-05,
+    scale_y=-8.384332e-05,
+    x_offset=-0.155613265,
+    y_offset=0.155613265,
+    n_rows=3712,
+    n_cols=3712,
+)
+
 SATELLITE_CONFIGS = {
     "goes16": GOES16_CONFIG,
     "goes18": GOES18_CONFIG,
@@ -126,6 +146,7 @@ SATELLITE_CONFIGS = {
     "himawari9": HIMAWARI9_CONFIG,
     "gk2a": GK2A_CONFIG,
     "mtg-i1": MTG_I1_CONFIG,
+    "msg-iodc": MSG_IODC_CONFIG,
 }
 
 

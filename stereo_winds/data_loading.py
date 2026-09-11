@@ -151,7 +151,7 @@ def _orbital_params(rad_attrs: dict) -> dict:
 
 
 def _sat_config_from_satpy(
-    ds: xr.Dataset, satellite_id: str, sweep: str = "x"
+    ds: xr.Dataset, satellite_id: str, sweep: str = "x",
 ) -> SatelliteConfig:
     """Build a SatelliteConfig from a satpy-returned xr.Dataset.
 
@@ -185,6 +185,10 @@ def _sat_config_from_satpy(
     scale_y = -float((y_vals[-1] - y_vals[0]) / (n_rows - 1) / sat_height)
     y_offset = float(y_vals[-1] / sat_height)  # north edge
 
+    # Readers whose instrument navigates on a non-GRS80 ellipsoid (MSG)
+    # state it with the scene; otherwise the dataclass default stands.
+    ellipsoid = ds.attrs.get("ellipsoid") or {}
+
     return SatelliteConfig(
         satellite_id=satellite_id,
         sub_lon_deg=sub_lon,
@@ -196,6 +200,8 @@ def _sat_config_from_satpy(
         y_offset=y_offset,
         n_rows=n_rows,
         n_cols=n_cols,
+        **{k: float(v) for k, v in ellipsoid.items()
+           if k in ("semi_major_m", "semi_minor_m")},
     )
 
 
@@ -545,6 +551,59 @@ def load_gk2a_scene(
     from stereo_winds.readers.gk2a import GK2A
 
     source = GK2A(satellite=satellite, bands=[band])
+    logger.info("Loading %s %s at %s via icechunk", satellite, band, t)
+
+    ds = source.data_at_time(t)
+
+    data = ds["Rad"].values[0, 0, :, :].astype(np.float32)
+    data = data[::-1]
+
+    sat_config = _sat_config_from_satpy(ds, satellite, sweep="y")
+    if coarsen:
+        data, sat_config, _ = _coarsen_to_canonical(data, sat_config, satellite)
+    logger.info(
+        "  %s: %dx%d, sub_lon=%.2f°",
+        satellite, sat_config.n_rows, sat_config.n_cols, sat_config.sub_lon_deg,
+    )
+    if return_aux:
+        t_start, t_end = _scene_time_bounds(ds)
+        return data, sat_config, {"t_start": t_start, "t_end": t_end,
+                                  "pixel_time": None}
+    return data, sat_config
+
+
+def load_msg_scene(
+    t: dt.datetime,
+    band: str,
+    satellite: str = "msg-iodc",
+    return_aux: bool = False,
+    coarsen: bool = True,
+):
+    """Load an MSG SEVIRI scene from icechunk, in native fixed-grid coords.
+
+    SEVIRI repeats its full disk every 15 minutes (not 10), and carries
+    eleven narrow channels against ABI's sixteen, so some ABI bands map
+    onto a shared SEVIRI channel and C04/C06 have none at all.
+
+    Parameters
+    ----------
+    t : target datetime (snapped to the nearest available scan)
+    band : SEVIRI band name (e.g. "IR_108") or ABI band name (e.g. "C14")
+    satellite : satellite identifier ("msg-iodc")
+    return_aux : if True, also return an aux dict with timing metadata
+    coarsen : if True (default), high-res bands are block-mean downsampled
+        to the canonical grid. SEVIRI narrow channels are all 3 km, so
+        this is a no-op for them.
+
+    Returns
+    -------
+    data : (n_rows, n_cols) float32 array, row 0 = north
+    sat_config : SatelliteConfig with scanning-angle coordinates in radians
+    aux : dict (only if return_aux)
+    """
+    from stereo_winds.readers.msg import MSG
+
+    source = MSG(satellite=satellite, bands=[band])
     logger.info("Loading %s %s at %s via icechunk", satellite, band, t)
 
     ds = source.data_at_time(t)
