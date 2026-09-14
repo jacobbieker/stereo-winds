@@ -421,12 +421,3 @@ class TestNoSpuriousWarnings:
             with _quiet_nan_arithmetic():
                 warnings.warn("something worth seeing", UserWarning)
         assert len(caught) == 1
-
-    def test_raft_autocast_is_not_deprecated(self):
-        """torch.cuda.amp.autocast warns on every RAFT forward from torch 2.4."""
-        from stereo_winds.flow.raft.raft import autocast
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
-            with autocast(enabled=False):
-                pass

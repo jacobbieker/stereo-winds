@@ -82,9 +82,13 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import re
 import resource
+import threading
 import sys
+from collections import OrderedDict
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
@@ -98,6 +102,12 @@ BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
 from stereo_winds.config import SATELLITE_CONFIGS, SatelliteConfig
+from stereo_winds.readers._cache import (
+    DEFAULT_DOWNLOAD_WORKERS,
+    DEFAULT_MEMORY_RESERVE,
+    available_memory_bytes,
+    default_scene_cache_bytes,
+)
 from stereo_winds.disparity import StereoDisparity
 from stereo_winds.navigation import (
     compute_grid_latlon,
@@ -273,6 +283,7 @@ def _check_same_grid(
 
 def _load_three_frames(
     sat_id: str, band: str, t0: datetime, dt_min: int | None = None,
+    prefetcher: ScenePrefetcher | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, SatelliteConfig, int]:
     """Load t-dt, t0, t+dt radiance frames plus the t0 scene's config.
 
@@ -284,13 +295,170 @@ def _load_three_frames(
     if dt_min is None:
         dt_min = scan_interval(sat_id)
     delta = timedelta(minutes=dt_min)
-    a_m, cfg_m = _load_scene(sat_id, band, t0 - delta)
-    a_0, cfg_0 = _load_scene(sat_id, band, t0)
-    a_p, cfg_p = _load_scene(sat_id, band, t0 + delta)
+    fetch = (prefetcher.get if prefetcher is not None
+             else lambda sat, b, when: _load_scene(sat, b, when))
+    a_m, cfg_m = fetch(sat_id, band, t0 - delta)
+    a_0, cfg_0 = fetch(sat_id, band, t0)
+    a_p, cfg_p = fetch(sat_id, band, t0 + delta)
     # t0 defines the retrieval grid; the neighbours must match it.
     _check_same_grid(cfg_0, cfg_m, f"{sat_id} {band} t-{dt_min}min")
     _check_same_grid(cfg_0, cfg_p, f"{sat_id} {band} t+{dt_min}min")
     return a_m, a_0, a_p, cfg_0, dt_min
+
+
+# ---------------------------------------------------------------------------
+# Scene prefetch: keep the GPU fed rather than waiting on object storage
+# ---------------------------------------------------------------------------
+
+SceneKey = tuple[str, str, datetime]
+
+
+class SceneCache:
+    """Bounded LRU of decoded scenes, keyed by (satellite, band, time).
+
+    Decoding a full disk costs a download plus a bz2/zarr decode for
+    ~120 MB of float32.  Consecutive timestamps genuinely reuse scans —
+    at a 10 minute step a slot is read as ``t+dt``, then as ``t0``, then
+    as ``t-dt`` — so holding the decoded array is worth real time.
+
+    The bound is in bytes and is enforced on insert; entries are dropped
+    least-recently-used first.  Eviction only drops the cache's
+    reference, so a scene a caller still holds stays alive.
+    """
+
+    def __init__(self, max_bytes: int) -> None:
+        self.max_bytes = max(0, int(max_bytes))
+        self._entries: OrderedDict[SceneKey, tuple] = OrderedDict()
+        self._bytes = 0
+        self._lock = threading.Lock()
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, key: SceneKey):
+        with self._lock:
+            value = self._entries.get(key)
+            if value is None:
+                self.misses += 1
+                return None
+            self._entries.move_to_end(key)
+            self.hits += 1
+            return value
+
+    def put(self, key: SceneKey, value: tuple) -> None:
+        data = value[0]
+        size = int(getattr(data, "nbytes", 0))
+        if self.max_bytes == 0 or size > self.max_bytes:
+            return
+        with self._lock:
+            if key in self._entries:
+                self._bytes -= int(getattr(self._entries[key][0], "nbytes", 0))
+                del self._entries[key]
+            self._entries[key] = value
+            self._bytes += size
+            while self._bytes > self.max_bytes and self._entries:
+                _, evicted = self._entries.popitem(last=False)
+                self._bytes -= int(getattr(evicted[0], "nbytes", 0))
+
+    @property
+    def nbytes(self) -> int:
+        with self._lock:
+            return self._bytes
+
+    def summary(self) -> str:
+        total = self.hits + self.misses
+        rate = 100.0 * self.hits / total if total else 0.0
+        return (f"scene cache {self.nbytes / 2**30:.1f}/"
+                f"{self.max_bytes / 2**30:.1f} GB, "
+                f"{self.hits}/{total} hits ({rate:.0f}%)")
+
+
+class ScenePrefetcher:
+    """Loads scenes on background threads so inference is not IO-bound.
+
+    Reading a scene is nearly all waiting — object-store round trips,
+    then a decode that releases the GIL — while the forward pass is
+    GPU-bound, so the two overlap well.  Requests are deduplicated, and
+    asking for a scene that is still in flight simply waits for it.
+    """
+
+    def __init__(self, cache: SceneCache, max_workers: int = 4) -> None:
+        self.cache = cache
+        self._pool = ThreadPoolExecutor(
+            max_workers=max(1, max_workers), thread_name_prefix="scene")
+        self._inflight: dict[SceneKey, Future] = {}
+        self._lock = threading.Lock()
+
+    def _load(self, key: SceneKey) -> tuple:
+        sat_id, band, t = key
+        value = _load_scene(sat_id, band, t)
+        self.cache.put(key, value)
+        return value
+
+    def submit(self, requests: list[SceneKey]) -> None:
+        """Start loading these scenes in the background, skipping duplicates."""
+        for key in requests:
+            with self._lock:
+                if key in self._inflight:
+                    continue
+                if self.cache.get(key) is not None:
+                    continue
+                self._inflight[key] = self._pool.submit(self._load, key)
+
+    def get(self, sat_id: str, band: str, t: datetime) -> tuple:
+        """Return a scene, waiting on a prefetch or loading it inline."""
+        key = (sat_id, band, t)
+        cached = self.cache.get(key)
+        if cached is not None:
+            return cached
+        with self._lock:
+            future = self._inflight.pop(key, None)
+        if future is not None:
+            return future.result()
+        return self._load(key)
+
+    def shutdown(self) -> None:
+        with self._lock:
+            futures = list(self._inflight.values())
+            self._inflight.clear()
+        for future in futures:
+            future.cancel()
+        self._pool.shutdown(wait=False, cancel_futures=True)
+
+
+def scene_requests(
+    sat_id: str,
+    t0: datetime,
+    flow_bands: list[str],
+    rad_bands: list[str],
+    rad_time_frames: int = 1,
+) -> list[SceneKey]:
+    """Every scene ``_build_input_stack`` will ask for, in the order it asks.
+
+    Knowing this up front is what lets the loads run ahead of the GPU.
+    """
+    delta = timedelta(minutes=scan_interval(sat_id))
+    requests: list[SceneKey] = []
+    seen: set[SceneKey] = set()
+
+    def add(band: str, when: datetime) -> None:
+        key = (sat_id, band, when)
+        if key not in seen:
+            seen.add(key)
+            requests.append(key)
+
+    for band in flow_bands:
+        if _band_available(sat_id, band):
+            for when in (t0 - delta, t0, t0 + delta):
+                add(band, when)
+    for band in rad_bands:
+        if not _band_available(sat_id, band):
+            continue
+        if rad_time_frames == 3:
+            for when in (t0 - delta, t0, t0 + delta):
+                add(band, when)
+        else:
+            add(band, t0)
+    return requests
 
 
 # ---------------------------------------------------------------------------
@@ -577,6 +745,7 @@ def _build_input_stack(
     flow_bands: list[str],
     rad_bands: list[str],
     rad_time_frames: int = 1,
+    prefetcher: ScenePrefetcher | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, SatelliteConfig]:
     """Build the (C, H, W) flow/rad/geom input stack from icechunk data.
 
@@ -626,7 +795,8 @@ def _build_input_stack(
             logger.warning("  Band %s unavailable on %s — filling with zeros", band, sat_id)
             missing_flow.extend(range(base, base + 4))
             continue
-        a_m, a_0, a_p, cfg, dt_used = _load_three_frames(sat_id, band, t0)
+        a_m, a_0, a_p, cfg, dt_used = _load_three_frames(
+            sat_id, band, t0, prefetcher=prefetcher)
         if scene_cfg is None:
             scene_cfg = cfg
         else:
@@ -678,10 +848,13 @@ def _build_input_stack(
             a_m, a_0, a_p, vb = cached.pop(band)
         else:
             if rad_time_frames == 3:
-                a_m, a_0, a_p, cfg, _ = _load_three_frames(sat_id, band, t0)
+                a_m, a_0, a_p, cfg, _ = _load_three_frames(
+                    sat_id, band, t0, prefetcher=prefetcher)
                 vb = np.isfinite(a_m) & np.isfinite(a_0) & np.isfinite(a_p)
             else:
-                a_0, cfg = _load_scene(sat_id, band, t0)
+                a_0, cfg = (prefetcher.get(sat_id, band, t0)
+                            if prefetcher is not None
+                            else _load_scene(sat_id, band, t0))
                 vb = np.isfinite(a_0)
                 a_m = a_p = None
             if scene_cfg is None:
@@ -820,6 +993,7 @@ def infer_satellite(
     rad_bands: list[str],
     device: str = "cuda",
     row_strip: int = 1024,
+    prefetcher: ScenePrefetcher | None = None,
 ) -> xr.Dataset:
     """Run student inference for one satellite and return an xr.Dataset.
 
@@ -833,7 +1007,7 @@ def infer_satellite(
     rad_tf = int(getattr(model, "rad_time_frames", 1))
     flow_arr, rad_arr, geom_arr, finite_mask, sat = _build_input_stack(
         sat_id, t0, disp, flow_bands, rad_bands,
-        rad_time_frames=rad_tf,
+        rad_time_frames=rad_tf, prefetcher=prefetcher,
     )
 
     # Navigate with what the data says, and say so when it disagrees with
@@ -1193,6 +1367,7 @@ def process_time(
     icechunk_chunk: int = 1024,
     icechunk_times: set[datetime] | None = None,
     write_netcdf: bool = True,
+    prefetcher: ScenePrefetcher | None = None,
 ) -> bool:
     """Run the full ring for a single timestamp and write its output.
 
@@ -1225,10 +1400,17 @@ def process_time(
     # holding all six full disks costs ~6 GB for no benefit.
     mosaic = None if skip_global else GlobalMosaic(resolution_m=resolution_m)
     done: list[str] = []
-    for sat_id in sats:
-        if sat_id not in SATELLITE_CONFIGS:
-            logger.warning("Unknown satellite %r, skipping", sat_id)
-            continue
+    todo = [s for s in sats if s in SATELLITE_CONFIGS]
+    for unknown in [s for s in sats if s not in SATELLITE_CONFIGS]:
+        logger.warning("Unknown satellite %r, skipping", unknown)
+
+    rad_tf = int(getattr(model, "rad_time_frames", 1)) if model is not None else 1
+    if prefetcher is not None and todo:
+        # Start the first satellite's reads before anything else happens.
+        prefetcher.submit(scene_requests(todo[0], t0, flow_bands, rad_bands,
+                                         rad_tf))
+
+    for i, sat_id in enumerate(todo):
         nc_path = sat_nc_path(out_dir, sat_id, t0)
         ds = None
         if skip_existing and write_netcdf and nc_path.exists():
@@ -1239,12 +1421,18 @@ def process_time(
             except Exception:
                 logger.exception("Failed to read %s — recomputing", nc_path)
                 ds = None
+        if prefetcher is not None and i + 1 < len(todo):
+            # Queue the next satellite now: its downloads then overlap this
+            # satellite's forward pass instead of following it.
+            prefetcher.submit(scene_requests(todo[i + 1], t0, flow_bands,
+                                             rad_bands, rad_tf))
         if ds is None:
             try:
                 ds = infer_satellite(
                     sat_id, t0, model, disp,
                     flow_bands, rad_bands,
                     device=device, row_strip=row_strip,
+                    prefetcher=prefetcher,
                 )
                 if write_netcdf:
                     ds.to_netcdf(nc_path)
@@ -1268,6 +1456,8 @@ def process_time(
 
     logger.info("[%s] Completed %d/%d satellites: %s",
                 tag, len(done), len(sats), done)
+    if prefetcher is not None:
+        logger.info("[%s] %s", tag, prefetcher.cache.summary())
 
     if mosaic is not None:
         logger.info("[%s] Assembling global mosaic (%.0f m grid)...",
@@ -1356,6 +1546,24 @@ def main():
                     help="Skip timestamps whose output already exists in "
                          "every configured sink (resume an interrupted range)")
 
+    perf = ap.add_argument_group("throughput")
+    perf.add_argument("--scene-cache-gb", type=float, default=None,
+                      help="RAM the decoded-scene cache may use (default: "
+                           "free memory minus a reserve for the working "
+                           "set; 0 disables caching)")
+    perf.add_argument("--memory-reserve-gb", type=float,
+                      default=DEFAULT_MEMORY_RESERVE / 2**30,
+                      help="Memory left for everything that is not the "
+                           "scene cache when sizing it automatically "
+                           f"(default {DEFAULT_MEMORY_RESERVE / 2**30:.0f})")
+    perf.add_argument("--prefetch-workers", type=int, default=4,
+                      help="Scenes decoded concurrently ahead of the GPU "
+                           "(default 4; 0 loads inline)")
+    perf.add_argument("--download-workers", type=int, default=None,
+                      help="Concurrent object-store downloads within one "
+                           "scene, e.g. AHI's ten segments "
+                           f"(default {DEFAULT_DOWNLOAD_WORKERS})")
+
     ic = ap.add_argument_group("icechunk output")
     ic.add_argument("--icechunk-store", default=None,
                     help="Write the global mosaic to this icechunk store, "
@@ -1424,6 +1632,25 @@ def main():
                          ", ".join(sats))
             sys.exit(1)
 
+    if args.download_workers is not None:
+        os.environ["STEREO_WINDS_DOWNLOAD_WORKERS"] = str(args.download_workers)
+
+    if args.scene_cache_gb is not None:
+        cache_bytes = int(args.scene_cache_gb * 2**30)
+    else:
+        cache_bytes = default_scene_cache_bytes(
+            reserve=int(args.memory_reserve_gb * 2**30))
+    available = available_memory_bytes()
+    logger.info("Scene cache: %.1f GB (%.1f GB memory available, %.1f GB "
+                "reserved for the working set)",
+                cache_bytes / 2**30,
+                (available or 0) / 2**30, args.memory_reserve_gb)
+    prefetcher = None
+    if args.prefetch_workers > 0:
+        prefetcher = ScenePrefetcher(SceneCache(cache_bytes),
+                                     max_workers=args.prefetch_workers)
+        logger.info("Prefetching scenes on %d worker(s)", args.prefetch_workers)
+
     # Optional icechunk sink, and the timestamps it already holds (resume)
     repo = None
     icechunk_times: set[datetime] = set()
@@ -1473,6 +1700,7 @@ def main():
                 icechunk_chunk=args.icechunk_chunk,
                 icechunk_times=icechunk_times,
                 write_netcdf=not args.no_netcdf,
+                prefetcher=prefetcher,
             )
         except Exception:
             logger.exception("Failed to process %s — continuing", t0.isoformat())
@@ -1481,6 +1709,10 @@ def main():
             n_ok += 1
         else:
             failed.append(t0.isoformat())
+
+    if prefetcher is not None:
+        logger.info("Final %s", prefetcher.cache.summary())
+        prefetcher.shutdown()
 
     where = args.icechunk_store if args.no_netcdf else str(out_dir)
     if args.icechunk_store and not args.no_netcdf:

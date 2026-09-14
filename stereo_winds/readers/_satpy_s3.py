@@ -25,16 +25,18 @@ from __future__ import annotations
 import contextlib
 import datetime as dt
 import logging
+import os
 import shutil
 import tempfile
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import xarray as xr
 
-from stereo_winds.readers._cache import default_cache_dir
+from stereo_winds.readers._cache import default_cache_dir, download_workers
 from stereo_winds.readers._geos_meta import (
     scene_ellipsoid,
     scene_orbital_parameters,
@@ -58,21 +60,46 @@ def s3_filesystem():
     return s3fs.S3FileSystem(anon=True)
 
 
-def download_keys(fs, keys: list[str], cache_dir: Path) -> list[Path]:
-    """Fetch ``keys`` into ``cache_dir``, skipping anything already there."""
+def download_keys(
+    fs, keys: list[str], cache_dir: Path, max_workers: int | None = None,
+) -> list[Path]:
+    """Fetch ``keys`` into ``cache_dir``, skipping anything already there.
+
+    Downloads run concurrently: an AHI band is ten separate segment
+    objects, and fetching them one after another leaves the link idle
+    between round trips.  Order of the returned paths matches ``keys``.
+    """
     cache_dir.mkdir(parents=True, exist_ok=True)
-    paths: list[Path] = []
-    fetched = 0
-    for key in keys:
-        local = cache_dir / key.rsplit("/", 1)[-1]
-        if not local.exists() or local.stat().st_size == 0:
-            tmp = local.with_suffix(local.suffix + ".part")
+    paths = [cache_dir / key.rsplit("/", 1)[-1] for key in keys]
+    todo = [(key, local) for key, local in zip(keys, paths)
+            if not local.exists() or local.stat().st_size == 0]
+    if not todo:
+        return paths
+
+    def fetch(item):
+        key, local = item
+        # Download to a sidecar first so an interrupted run cannot leave a
+        # truncated file that later looks like a cache hit.
+        tmp = local.with_suffix(local.suffix + f".part{os.getpid()}")
+        try:
             fs.get(key, str(tmp))
             tmp.replace(local)
-            fetched += 1
-        paths.append(local)
-    if fetched:
-        logger.info("  downloaded %d file(s) to %s", fetched, cache_dir)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+        return local
+
+    workers = max_workers or download_workers()
+    if workers > 1 and len(todo) > 1:
+        with ThreadPoolExecutor(max_workers=min(workers, len(todo))) as pool:
+            # list() re-raises the first failure once all are done.
+            list(pool.map(fetch, todo))
+    else:
+        for item in todo:
+            fetch(item)
+    logger.info("  downloaded %d file(s) to %s (%d worker%s)",
+                len(todo), cache_dir, min(workers, len(todo)),
+                "" if min(workers, len(todo)) == 1 else "s")
     return paths
 
 
