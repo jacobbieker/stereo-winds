@@ -91,6 +91,9 @@ class Himawari(GeoStoreReader):
         requested time, read the native HSD files from NOAA's public
         bucket with satpy instead (default True)
     cache_dir : where downloaded HSD segments are kept
+    cache_retention : drop cached scans more than this far
+        before the scene being read (default one hour;
+        None keeps everything)
     """
 
     instrument = "ahi"
@@ -124,8 +127,10 @@ class Himawari(GeoStoreReader):
         bands: list[str] | None = None,
         allow_s3_fallback: bool = True,
         cache_dir: str | None = None,
+        cache_retention: dt.timedelta | None = -1,
     ) -> None:
-        super().__init__(satellite, bands, allow_s3_fallback, cache_dir)
+        super().__init__(satellite, bands, allow_s3_fallback, cache_dir,
+                         cache_retention)
 
     # ------------------------------------------------------------------
     # Public-S3 fallback (native HSD segments via satpy)
@@ -169,7 +174,11 @@ class Himawari(GeoStoreReader):
             self.fs, keys,
             self.cache_dir / self.satellite / f"{slot:%Y%m%d_%H%M}",
         )
-        da = load_scene_array("ahi_hsd", paths, band)
+        # Decompression scratch goes beside the download cache,
+        # not /tmp, and is removed as soon as the scene is read.
+        da = load_scene_array(
+            "ahi_hsd", paths, band, scratch_dir=self.cache_dir,
+        )
         return scene_to_rad(
             da, band, sweep=self.sweep,
             fallback_sub_lon=self.nominal_sub_lon,

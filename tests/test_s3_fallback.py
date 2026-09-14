@@ -6,13 +6,21 @@ orientation of the converted scene.
 """
 
 import datetime as dt
+import sys
+import tempfile
 import types
+import warnings
+from pathlib import Path
 
 import numpy as np
 import pytest
 import xarray as xr
 
-from stereo_winds.readers._satpy_s3 import SceneNotInStore, scene_to_rad
+from stereo_winds.readers._satpy_s3 import (
+    SceneNotInStore,
+    load_scene_array,
+    scene_to_rad,
+)
 from stereo_winds.readers.gk2a import GK2A
 from stereo_winds.readers.himawari import Himawari
 
@@ -229,3 +237,196 @@ class TestSceneToRad:
         ds = self._convert(values, (2000.0, 2000.0, -2000.0, -2000.0))
         assert ds.x.values[0] < ds.x.values[-1]
         assert ds.y.values[0] < ds.y.values[-1]
+
+
+# ── satpy scratch-file cleanup ────────────────────────────────────────
+
+class _FakeConfig:
+    """Stand-in for satpy.config: a get/set pair with a context manager."""
+
+    def __init__(self):
+        self._values = {"tmp_dir": tempfile.gettempdir()}
+
+    def get(self, key, default=None):
+        return self._values.get(key, default)
+
+    def set(self, **kwargs):
+        config = self
+
+        class _Ctx:
+            def __enter__(self_inner):
+                self_inner.old = dict(config._values)
+                config._values.update(kwargs)
+                return config
+
+            def __exit__(self_inner, *exc):
+                config._values = self_inner.old
+                return False
+
+        return _Ctx()
+
+
+def _install_fake_satpy(monkeypatch, record):
+    """Inject a satpy whose Scene writes a file into the configured tmp_dir.
+
+    That is what ``ahi_hsd`` does for every bz2 segment, and what used to
+    pile up in /tmp.
+    """
+    config = _FakeConfig()
+
+    class FakeScene:
+        def __init__(self, reader, filenames):
+            record["reader"] = reader
+            # Simulate decompression into satpy's configured scratch area.
+            tmp_dir = Path(config.get("tmp_dir"))
+            for i, _ in enumerate(filenames):
+                path = tmp_dir / f"segment-{i}.DAT"
+                path.write_bytes(b"x" * 16)
+                record.setdefault("written", []).append(path)
+
+        def load(self, bands):
+            record["loaded"] = list(bands)
+
+        def __getitem__(self, band):
+            data = xr.DataArray(np.ones((2, 2), np.float32),
+                                dims=("y", "x"), attrs={"band": band})
+
+            class Lazy(xr.DataArray):
+                __slots__ = ()
+
+                def compute(self_inner, **kw):
+                    record["computed"] = True
+                    return data
+
+            return Lazy(data)
+
+    satpy = types.ModuleType("satpy")
+    satpy.config = config
+    satpy.Scene = FakeScene
+    monkeypatch.setitem(sys.modules, "satpy", satpy)
+    return record
+
+
+class TestScratchCleanup:
+    def test_scratch_goes_to_the_given_directory_not_tmp(self, tmp_path, monkeypatch):
+        record = _install_fake_satpy(monkeypatch, {})
+        scratch = tmp_path / "cache"
+        load_scene_array("ahi_hsd", [Path("a.bz2"), Path("b.bz2")], "B14",
+                         scratch_dir=scratch)
+        written = record["written"]
+        assert written, "fake satpy wrote nothing"
+        for path in written:
+            assert scratch in path.parents, f"{path} escaped the scratch dir"
+
+    def test_scratch_directory_is_removed(self, tmp_path, monkeypatch):
+        """Regression: satpy only unlinks these when handlers are collected."""
+        record = _install_fake_satpy(monkeypatch, {})
+        scratch = tmp_path / "cache"
+        load_scene_array("ahi_hsd", [Path("a.bz2")], "B14", scratch_dir=scratch)
+        assert not list(scratch.glob("satpy-scratch-*"))
+        assert not any(p.exists() for p in record["written"])
+
+    def test_data_is_computed_before_cleanup(self, tmp_path, monkeypatch):
+        """A lazy array would reference files we are about to delete."""
+        record = _install_fake_satpy(monkeypatch, {})
+        out = load_scene_array("ahi_hsd", [Path("a.bz2")], "B14",
+                               scratch_dir=tmp_path / "cache")
+        assert record.get("computed") is True
+        assert isinstance(out.values, np.ndarray)
+
+    def test_cleanup_happens_even_on_failure(self, tmp_path, monkeypatch):
+        record = _install_fake_satpy(monkeypatch, {})
+        satpy = sys.modules["satpy"]
+
+        class Boom(satpy.Scene):
+            def load(self, bands):
+                raise RuntimeError("decode failed")
+
+        satpy.Scene = Boom
+        scratch = tmp_path / "cache"
+        with pytest.raises(RuntimeError, match="decode failed"):
+            load_scene_array("ahi_hsd", [Path("a.bz2")], "B14",
+                             scratch_dir=scratch)
+        assert not list(scratch.glob("satpy-scratch-*"))
+
+    def test_each_load_uses_a_fresh_directory(self, tmp_path, monkeypatch):
+        """Concurrent or repeated loads must not share a scratch path."""
+        record = _install_fake_satpy(monkeypatch, {})
+        seen = set()
+        for _ in range(3):
+            record["written"] = []
+            load_scene_array("ahi_hsd", [Path("a.bz2")], "B14",
+                             scratch_dir=tmp_path / "cache")
+            seen.add(record["written"][0].parent)
+        assert len(seen) == 3
+
+
+# ── Warning hygiene ───────────────────────────────────────────────────
+
+class TestNoSpuriousWarnings:
+    """Every scene load used to emit the same three warnings."""
+
+    def test_crs_read_without_the_proj4_warning(self):
+        """CRS.to_dict() round-trips via PROJ and warns on every scene."""
+        from pyproj import CRS
+
+        from stereo_winds.readers._satpy_s3 import _crs_parameters
+
+        area = types.SimpleNamespace(crs=CRS.from_dict({
+            "proj": "geos", "lon_0": 140.7, "h": 35785863.0,
+            "a": 6378137.0, "rf": 298.257024882273,
+        }))
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            params = _crs_parameters(area)
+        assert params["proj"] == "geos"
+        assert params["lon_0"] == pytest.approx(140.7)
+        assert params["h"] == pytest.approx(35785863.0)
+        assert params["a"] == pytest.approx(6378137.0)
+
+    def test_crs_parameters_feed_the_metadata_reader(self):
+        """The proj-style keys must be the ones area_projection reads."""
+        from pyproj import CRS
+
+        from stereo_winds.readers._geos_meta import scene_orbital_parameters
+        from stereo_winds.readers._satpy_s3 import _crs_parameters
+
+        area = types.SimpleNamespace(crs=CRS.from_dict({
+            "proj": "geos", "lon_0": 45.5, "h": 35785831.0, "a": 6378169.0,
+            "rf": 295.488065897014,
+        }))
+        meta = xr.Dataset(attrs={"area": {"projection": _crs_parameters(area)}})
+        orb = scene_orbital_parameters(meta, fallback_sub_lon=0.0,
+                                       fallback_height=1.0)
+        assert orb["projection_longitude"] == pytest.approx(45.5)
+        assert orb["projection_altitude"] == pytest.approx(35785831.0)
+
+    def test_calibration_nan_warning_is_suppressed(self):
+        from stereo_winds.readers._satpy_s3 import _quiet_nan_arithmetic
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with _quiet_nan_arithmetic():
+                with np.errstate(invalid="warn"):
+                    np.log(np.array([-1.0, np.nan]))
+        assert not [w for w in caught
+                    if "invalid value encountered in log" in str(w.message)]
+
+    def test_other_warnings_still_get_through(self):
+        """The filter must be narrow — it runs around real data loading."""
+        from stereo_winds.readers._satpy_s3 import _quiet_nan_arithmetic
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with _quiet_nan_arithmetic():
+                warnings.warn("something worth seeing", UserWarning)
+        assert len(caught) == 1
+
+    def test_raft_autocast_is_not_deprecated(self):
+        """torch.cuda.amp.autocast warns on every RAFT forward from torch 2.4."""
+        from stereo_winds.flow.raft.raft import autocast
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with autocast(enabled=False):
+                pass

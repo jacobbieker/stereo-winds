@@ -43,11 +43,12 @@ from stereo_winds.readers._geos_meta import (
     scene_ellipsoid,
     scene_orbital_parameters,
 )
-from stereo_winds.readers._satpy_s3 import (
-    SceneNotInStore,
+from stereo_winds.readers._cache import (
     default_cache_dir,
-    s3_filesystem,
+    default_retention,
+    prune_cache,
 )
+from stereo_winds.readers._satpy_s3 import SceneNotInStore, s3_filesystem
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +106,7 @@ class GeoStoreReader:
         bands: list[str] | None = None,
         allow_s3_fallback: bool = True,
         cache_dir: str | None = None,
+        cache_retention: dt.timedelta | None = -1,
     ) -> None:
         self.satellite = satellite if satellite is not None else self.satellites()[0]
         if self.satellite not in self.satellites():
@@ -117,6 +119,10 @@ class GeoStoreReader:
         # Inert on readers without a fallback (supports_s3_fallback False).
         self.allow_s3_fallback = allow_s3_fallback
         self.cache_dir = Path(cache_dir) if cache_dir else default_cache_dir()
+        # Downloads older than this (relative to the scene being read) are
+        # dropped; None keeps everything.
+        self.cache_retention = (default_retention() if cache_retention == -1
+                                else cache_retention)
         self._fs = None
 
     @classmethod
@@ -256,7 +262,15 @@ class GeoStoreReader:
             logger.exception(
                 "icechunk read failed for %s %s at %s — falling back to "
                 "public S3", self.satellite, band, t)
-        return self._s3_data_at_time(t, band)
+        out = self._s3_data_at_time(t, band)
+        self.prune_download_cache(t)
+        return out
+
+    def prune_download_cache(self, t: dt.datetime) -> None:
+        """Drop cached scans more than ``cache_retention`` before ``t``."""
+        if self.cache_retention is None:
+            return
+        prune_cache(self.cache_dir / self.satellite, t - self.cache_retention)
 
     def _icechunk_data_at_time(self, t: dt.datetime, band: str) -> xr.Dataset:
         """Read the scene from the source.coop icechunk store."""

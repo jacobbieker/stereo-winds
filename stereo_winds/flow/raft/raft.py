@@ -7,9 +7,15 @@ from .extractor import BasicEncoder, SmallEncoder
 from .corr import CorrBlock, AlternateCorrBlock
 from .utils.utils import coords_grid, upflow8
 
-try:
+# Local change to the vendored RAFT: torch.cuda.amp.autocast is
+# deprecated from torch 2.4 in favour of the device-typed form, and warns
+# on every forward pass.  The call sites below are unchanged.
+if hasattr(torch, "amp") and hasattr(torch.amp, "autocast"):
+    def autocast(enabled=True):
+        return torch.amp.autocast("cuda", enabled=enabled)
+elif hasattr(torch.cuda, "amp"):
     autocast = torch.cuda.amp.autocast
-except Exception:
+else:
     # dummy autocast for PyTorch < 1.6
     class autocast:
         def __init__(self, enabled):

@@ -168,7 +168,9 @@ class TestMergeGlobal:
 
     def test_merge_synthetic(self):
         """Merge two fake satellite datasets and verify zenith-priority rule."""
-        from infer_student_global_ring import merge_global
+        from infer_student_global_ring import (
+            decode_source_satellite, merge_global,
+        )
 
         ny, nx = 50, 50
         rng = np.random.default_rng(42)
@@ -209,10 +211,10 @@ class TestMergeGlobal:
 
         assert "latitude" in merged.coords
         assert "longitude" in merged.coords
-        assert "source_satellite" in merged.data_vars
+        assert "source_satellite_index" in merged.data_vars
 
         # In the overlap region, sat_a (lower zenith) should dominate
-        src = merged["source_satellite"].values
+        src = decode_source_satellite(merged)
         n_a = (src == "sat_a").sum()
         n_b = (src == "sat_b").sum()
         assert n_a > 0, "sat_a should contribute some cells"
@@ -230,7 +232,9 @@ class TestMergeGlobal:
 
     def test_merge_two_real_satellites(self, model, disp):
         """Run inference on two real satellites and merge them."""
-        from infer_student_global_ring import infer_satellite, merge_global
+        from infer_student_global_ring import (
+            decode_source_satellite, infer_satellite, merge_global,
+        )
 
         # Use two satellites with nearby longitudes for overlap
         per_sat = {}
@@ -246,10 +250,10 @@ class TestMergeGlobal:
         merged = merge_global(per_sat, resolution_m=50_000.0)
 
         assert "u_wind" in merged.data_vars
-        assert "source_satellite" in merged.data_vars
+        assert "source_satellite_index" in merged.data_vars
 
         # Both satellites should contribute
-        src = merged["source_satellite"].values
+        src = decode_source_satellite(merged)
         sats_present = set(src[src != ""])
         assert len(sats_present) == 2, (
             f"Expected both satellites in merge, got {sats_present}")

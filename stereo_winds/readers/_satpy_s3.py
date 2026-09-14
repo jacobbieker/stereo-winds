@@ -22,29 +22,33 @@ Requires ``satpy`` and ``s3fs``.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import logging
-import os
+import shutil
+import tempfile
+import warnings
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import xarray as xr
 
-from stereo_winds.readers._geos_meta import scene_orbital_parameters
+from stereo_winds.readers._cache import default_cache_dir
+from stereo_winds.readers._geos_meta import (
+    scene_ellipsoid,
+    scene_orbital_parameters,
+)
+
+# GRS80, when the scene's CRS states no ellipsoid of its own.
+_GRS80_SEMI_MAJOR = 6378137.0
+_GRS80_SEMI_MINOR = 6356752.31414
 
 logger = logging.getLogger(__name__)
 
 
 class SceneNotInStore(LookupError):
     """The icechunk store has no scan close enough to the requested time."""
-
-
-def default_cache_dir() -> Path:
-    """Where downloaded L1b files are kept between runs."""
-    env = os.environ.get("STEREO_WINDS_DATA_DIR")
-    base = Path(env) if env else Path.home() / ".cache" / "stereo_winds"
-    return base / "l1b"
 
 
 def s3_filesystem():
@@ -72,17 +76,99 @@ def download_keys(fs, keys: list[str], cache_dir: Path) -> list[Path]:
     return paths
 
 
-def load_scene_array(reader: str, paths: list[Path], band: str):
-    """Load one band from local L1b files and return the satpy DataArray."""
+@contextlib.contextmanager
+def _quiet_nan_arithmetic():
+    """Silence the expected NaN arithmetic in satpy's IR calibration.
+
+    Off-disk pixels carry no counts, so the radiance -> brightness
+    temperature conversion takes the log of NaN (and of the odd negative
+    radiance) for every space pixel.  NaN in, NaN out is the intended
+    result, but numpy warns per chunk and dask surfaces it from a worker
+    thread.  Filters are process-wide, which is what reaches those
+    threads; the scope is one satpy load.
+    """
+    with warnings.catch_warnings():
+        for message in ("invalid value encountered in log",
+                        "divide by zero encountered in log",
+                        "invalid value encountered in divide"):
+            warnings.filterwarnings("ignore", category=RuntimeWarning,
+                                    message=message)
+        yield
+
+
+def load_scene_array(
+    reader: str, paths: list[Path], band: str,
+    scratch_dir: Path | None = None,
+):
+    """Load one band from local L1b files, returning an in-memory DataArray.
+
+    AHI ships its HSD segments bz2-compressed, and satpy decompresses
+    each one into ``satpy.config["tmp_dir"]`` — ``/tmp`` by default.  It
+    removes them in the file handler's ``__del__``, which only runs when
+    the handler is garbage collected, so across a long run the
+    decompressed segments (~40 MB per band per slot) accumulate until
+    ``/tmp`` fills and the process dies.
+
+    So: point satpy at a scratch directory of our own, force the data
+    into memory while the decompressed files still exist, and delete the
+    directory outright afterwards.  Cleanup does not depend on when — or
+    whether — satpy's handlers are collected.
+    """
+    import satpy
     from satpy import Scene
 
-    scn = Scene(reader=reader, filenames=[str(p) for p in paths])
-    scn.load([band])
-    return scn[band]
+    base = Path(scratch_dir) if scratch_dir else default_cache_dir()
+    base.mkdir(parents=True, exist_ok=True)
+    tmp_dir = tempfile.mkdtemp(prefix="satpy-scratch-", dir=str(base))
+    try:
+        with satpy.config.set(tmp_dir=tmp_dir), _quiet_nan_arithmetic():
+            scn = Scene(reader=reader, filenames=[str(p) for p in paths])
+            scn.load([band])
+            # compute() while the decompressed segments are still on
+            # disk: the returned array must not be lazily backed by
+            # files we are about to delete.
+            da = scn[band].compute()
+        del scn
+        return da
+    finally:
+        leftover = sum(1 for _ in Path(tmp_dir).rglob("*"))
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        if leftover:
+            logger.debug("Removed %d satpy scratch file(s) from %s",
+                         leftover, tmp_dir)
 
 
-def _area_info(da: Any) -> tuple[np.ndarray, np.ndarray, dict | None]:
-    """Cell-centre x/y (metres, row 0 = north) and the CRS dict, from satpy."""
+# CF grid-mapping key -> the proj-style key the metadata reader expects.
+_CF_TO_PROJ = {
+    "longitude_of_projection_origin": "lon_0",
+    "perspective_point_height": "h",
+    "semi_major_axis": "a",
+    "semi_minor_axis": "b",
+    "inverse_flattening": "rf",
+    "sweep_angle_axis": "sweep",
+}
+
+
+def _crs_parameters(area: Any) -> dict | None:
+    """Projection parameters from a pyresample area, as a proj-style dict.
+
+    Read through ``CRS.to_cf()`` rather than ``CRS.to_dict()``: the latter
+    round-trips via a PROJ string and warns "you will likely lose
+    important projection information" on every single scene.
+    """
+    try:
+        cf = area.crs.to_cf()
+    except Exception:  # pragma: no cover - depends on pyproj internals
+        return None
+    params = {proj_key: cf[cf_key]
+              for cf_key, proj_key in _CF_TO_PROJ.items() if cf_key in cf}
+    if cf.get("grid_mapping_name") == "geostationary":
+        params["proj"] = "geos"
+    return params or None
+
+
+def _area_info(da: Any, want_crs: bool = True) -> tuple[np.ndarray, np.ndarray, dict | None]:
+    """Cell-centre x/y (metres, row 0 = north) and the CRS, from satpy."""
     area = da.attrs.get("area")
     if area is None:
         raise ValueError("satpy scene carries no area definition")
@@ -93,10 +179,7 @@ def _area_info(da: Any) -> tuple[np.ndarray, np.ndarray, dict | None]:
     x = ll_x + (np.arange(nx) + 0.5) * dx
     # pyresample puts row 0 at the upper (north) edge of the extent.
     y_top_down = ur_y - (np.arange(ny) + 0.5) * dy
-    try:
-        crs = dict(area.crs.to_dict())
-    except Exception:  # pragma: no cover - depends on pyproj internals
-        crs = None
+    crs = _crs_parameters(area) if want_crs else None
     return x.astype(np.float64), y_top_down.astype(np.float64), crs
 
 
@@ -118,6 +201,9 @@ def scene_to_rad(
     values = np.asarray(da.values, dtype=np.float32)
     if values.ndim > 2:
         values = values.reshape(values.shape[-2:])
+    orbital_attr = da.attrs.get("orbital_parameters")
+    # The CRS is only a fallback for the projection, but it is always the
+    # authority on the ellipsoid.
     x_m, y_m, crs = _area_info(da)
 
     # Normalise to ascending axes, moving the data with the coordinates.
@@ -130,8 +216,8 @@ def scene_to_rad(
 
     # Reuse the store metadata reader by handing it satpy's attrs.
     meta = xr.Dataset(attrs={})
-    if isinstance(da.attrs.get("orbital_parameters"), dict):
-        meta.attrs["orbital_parameters"] = da.attrs["orbital_parameters"]
+    if isinstance(orbital_attr, dict):
+        meta.attrs["orbital_parameters"] = orbital_attr
     if crs is not None:
         meta.attrs["area"] = {"projection": crs}
     orbital = scene_orbital_parameters(
@@ -159,4 +245,11 @@ def scene_to_rad(
     out = xr.Dataset({"Rad": Rad})
     out.attrs["sweep_angle_axis"] = sweep
     out.attrs["source"] = "public S3 L1b via satpy"
+    semi_major, semi_minor = scene_ellipsoid(
+        meta, fallback_semi_major=_GRS80_SEMI_MAJOR,
+        fallback_semi_minor=_GRS80_SEMI_MINOR,
+    )
+    out.attrs["ellipsoid"] = {
+        "semi_major_m": semi_major, "semi_minor_m": semi_minor,
+    }
     return out

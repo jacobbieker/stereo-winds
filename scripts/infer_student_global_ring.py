@@ -11,6 +11,19 @@ on each, and produces:
    regions use the AMV from whichever satellite has the smallest zenith
    angle (closest to the sub-satellite point)
 
+The mosaic records its winning satellite per cell as
+``source_satellite_index`` — ``int8`` codes into the ``satellites``
+attribute, with ``-1`` where nothing contributed.  Use
+``decode_source_satellite`` to turn a slice back into names; the full
+string array is 9 GB at 2 km, which is why the codes are what gets
+stored.
+
+Memory scales with the mosaic grid, not the number of satellites:
+full disks are gridded as they finish and released immediately.  Peak
+RSS is logged after every satellite, so an approaching limit is
+visible before the kernel intervenes.  If the accumulator itself is too
+large for the machine, raise ``--resolution-m``.
+
 Outputs use a deterministic layout under ``--output-dir``::
 
     <output-dir>/<YYYYMMDD>/student_amv_<sat_id>_<YYYYMMDDTHHMM>.nc
@@ -70,6 +83,7 @@ from __future__ import annotations
 import argparse
 import logging
 import re
+import resource
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -130,6 +144,21 @@ SCAN_INTERVAL_MINUTES: dict[str, int] = {"msg-iodc": 15}
 def scan_interval(sat_id: str) -> int:
     """Minutes between consecutive full disks for this satellite."""
     return SCAN_INTERVAL_MINUTES.get(sat_id, DT_MINUTES)
+
+
+# ---------------------------------------------------------------------------
+# Memory reporting
+# ---------------------------------------------------------------------------
+
+def peak_rss_gb() -> float:
+    """Peak resident set size of this process, in GiB."""
+    # ru_maxrss is kilobytes on Linux.
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024 / 1024
+
+
+def log_peak_rss(tag: str) -> None:
+    """Log the high-water mark, so an OOM kill can be anticipated."""
+    logger.info("%s: peak RSS %.2f GB", tag, peak_rss_gb())
 
 
 # ---------------------------------------------------------------------------
@@ -559,26 +588,54 @@ def _build_input_stack(
     from the projection metadata of the scenes actually loaded, so a
     drifted or relocated satellite is navigated where it really is.
 
+    Channels are written straight into their slot in the output array
+    and their sources freed as we go: stacking a list of 20 full disks
+    and then running ``nan_to_num`` over it would hold three copies of
+    the same 2.3 GB at once.
+
     Returns (flow_arr, rad_arr, geom_arr, finite_mask, scene_config).
     """
-    # Placeholder for channels of bands this satellite does not carry;
-    # they become zeros once a loaded scene has established the shape.
-    MISSING = None
-    flow_chans: list[np.ndarray | None] = []
-    cached: dict[str, tuple] = {}  # band -> (a_m, a_0, a_p, valid)
+    n_flow_ch = 4 * len(flow_bands)
+    n_rad_frames = 3 if rad_time_frames == 3 else 1
+    n_rad_ch = n_rad_frames * len(rad_bands)
+
+    flow_arr: np.ndarray | None = None
+    rad_arr: np.ndarray | None = None
+    finite_mask: np.ndarray | None = None
     scene_cfg: SatelliteConfig | None = None
+    # Channels of bands this satellite does not carry; zeroed once a
+    # loaded scene has established the grid shape.
+    missing_flow: list[int] = []
+    missing_rad: list[int] = []
+    # Frames the radiance pass will need again, kept only for those bands.
+    rad_needed = {b for b in rad_bands if _band_available(sat_id, b)}
+    cached: dict[str, tuple] = {}
+
+    def _mark_finite(channel: np.ndarray) -> None:
+        """Fold one channel into the running finite mask."""
+        nonlocal finite_mask
+        if finite_mask is None:
+            finite_mask = np.isfinite(channel)
+        else:
+            np.logical_and(finite_mask, np.isfinite(channel), out=finite_mask)
 
     logger.info("  Loading flow bands: %s", flow_bands)
-    for band in flow_bands:
+    for i, band in enumerate(flow_bands):
+        base = 4 * i
         if not _band_available(sat_id, band):
             logger.warning("  Band %s unavailable on %s — filling with zeros", band, sat_id)
-            flow_chans += [MISSING] * 4
+            missing_flow.extend(range(base, base + 4))
             continue
         a_m, a_0, a_p, cfg, dt_used = _load_three_frames(sat_id, band, t0)
         if scene_cfg is None:
             scene_cfg = cfg
         else:
             _check_same_grid(scene_cfg, cfg, f"{sat_id} {band}")
+        if flow_arr is None:
+            H, W = a_0.shape
+            flow_arr = np.empty((n_flow_ch, H, W), dtype=np.float32)
+            rad_arr = np.empty((n_rad_ch, H, W), dtype=np.float32)
+
         valid = np.isfinite(a_m) & np.isfinite(a_0) & np.isfinite(a_p)
         fb = disp._run_pair(a_0, a_m)
         ff = disp._run_pair(a_0, a_p)
@@ -593,22 +650,32 @@ def _build_input_stack(
                         sat_id, dt_used, scale, DT_MINUTES)
             fb *= scale
             ff *= scale
-        for fl in (fb, ff):
-            fl[:, ~valid] = np.nan
-        flow_chans += [fb[0], fb[1], ff[0], ff[1]]
-        cached[band] = (a_m, a_0, a_p, valid)
 
-    rad_chans: list[np.ndarray | None] = []
+        for k, component in enumerate((fb[0], fb[1], ff[0], ff[1])):
+            channel = flow_arr[base + k]
+            np.copyto(channel, component)
+            channel[~valid] = np.nan
+            channel /= FLOW_SCALE
+            _mark_finite(channel)
+        del fb, ff
+
+        if band in rad_needed:
+            cached[band] = ((a_m, a_0, a_p, valid) if rad_time_frames == 3
+                            else (None, a_0, None, valid))
+        del a_m, a_p
+
+    rad_offset = 0
     logger.info("  Loading rad bands: %s", rad_bands)
     for band in rad_bands:
-        n_frames = 3 if rad_time_frames == 3 else 1
+        base = rad_offset
+        rad_offset += n_rad_frames
         if not _band_available(sat_id, band):
             logger.warning("  Band %s unavailable on %s — filling with zeros", band, sat_id)
-            rad_chans += [MISSING] * n_frames
+            missing_rad.extend(range(base, base + n_rad_frames))
             continue
 
         if band in cached:
-            a_m, a_0, a_p, vb = cached[band]
+            a_m, a_0, a_p, vb = cached.pop(band)
         else:
             if rad_time_frames == 3:
                 a_m, a_0, a_p, cfg, _ = _load_three_frames(sat_id, band, t0)
@@ -621,39 +688,44 @@ def _build_input_stack(
                 scene_cfg = cfg
             else:
                 _check_same_grid(scene_cfg, cfg, f"{sat_id} {band}")
+        if rad_arr is None:
+            H, W = a_0.shape
+            flow_arr = np.empty((n_flow_ch, H, W), dtype=np.float32)
+            rad_arr = np.empty((n_rad_ch, H, W), dtype=np.float32)
 
-        if rad_time_frames == 3:
-            for frame in (a_m, a_0, a_p):
-                r = frame.copy()
-                r[~vb] = np.nan
-                rad_chans.append(r)
-        else:
-            r = a_0.copy()
-            r[~vb] = np.nan
-            rad_chans.append(r)
+        frames = (a_m, a_0, a_p) if rad_time_frames == 3 else (a_0,)
+        for k, frame in enumerate(frames):
+            channel = rad_arr[base + k]
+            np.copyto(channel, frame)
+            channel[~vb] = np.nan
+            _mark_finite(channel)
+        del a_m, a_0, a_p, frames
 
-    if scene_cfg is None:
+    del cached
+
+    if scene_cfg is None or flow_arr is None or rad_arr is None:
         raise RuntimeError(
             f"{sat_id}: none of the requested bands are available "
             f"(flow={flow_bands}, rad={rad_bands}) — nothing to navigate from"
         )
 
-    H, W = scene_cfg.n_rows, scene_cfg.n_cols
-    zero = np.zeros((H, W), dtype=np.float32)
-    flow_chans = [zero if c is MISSING else c for c in flow_chans]
-    rad_chans = [zero if c is MISSING else c for c in rad_chans]
+    if missing_flow:
+        flow_arr[missing_flow] = 0.0
+    if missing_rad:
+        rad_arr[missing_rad] = 0.0
 
     dx_m, dy_m = compute_pixel_scale(scene_cfg)
     zen = compute_grid_zenith(scene_cfg)
-
-    flow_arr = np.stack(flow_chans, 0).astype(np.float32) / FLOW_SCALE
-    rad_arr = np.stack(rad_chans, 0).astype(np.float32)
     geom_arr = np.stack(
         [dx_m / PIXEL_SCALE_NORM, dy_m / PIXEL_SCALE_NORM, zen / ZENITH_NORM], 0,
     ).astype(np.float32)
-    finite_mask = np.isfinite(flow_arr).all(0) & np.isfinite(rad_arr).all(0)
-    return (np.nan_to_num(flow_arr), np.nan_to_num(rad_arr),
-            np.nan_to_num(geom_arr), finite_mask, scene_cfg)
+    del dx_m, dy_m, zen
+
+    # In place: the model only needs the NaNs replaced, not a fresh copy.
+    np.nan_to_num(flow_arr, copy=False)
+    np.nan_to_num(rad_arr, copy=False)
+    np.nan_to_num(geom_arr, copy=False)
+    return flow_arr, rad_arr, geom_arr, finite_mask, scene_cfg
 
 
 # ---------------------------------------------------------------------------
@@ -699,24 +771,40 @@ def _forward_full_disk(
 def _assemble_vars(
     raw: dict[str, np.ndarray], finite_mask: np.ndarray,
 ) -> dict[str, np.ndarray]:
-    """Convert raw model output to the standard AMV variable schema."""
-    u = np.where(finite_mask, raw["u_mean"], np.nan)
-    v = np.where(finite_mask, raw["v_mean"], np.nan)
-    h_km = np.where(finite_mask, raw["h_mean"], np.nan)
-    sigma_u = np.exp(0.5 * raw["u_logvar"])
-    sigma_v = np.exp(0.5 * raw["v_logvar"])
-    sigma_h_km = np.exp(0.5 * raw["h_logvar"])
+    """Convert raw model output to the standard AMV variable schema.
+
+    ``raw`` is consumed: each field is dropped as it is converted, so
+    the two representations of a full disk are never both resident.
+    """
+    # Mask in place — raw is ours to spend.
+    u = raw.pop("u_mean")
+    v = raw.pop("v_mean")
+    h_km = raw.pop("h_mean")
+    for arr in (u, v, h_km):
+        arr[~finite_mask] = np.nan
+
     valid = finite_mask & np.isfinite(u) & np.isfinite(v) & np.isfinite(h_km)
     qf = np.where(valid, 2.0, 0.0).astype(np.float32)
-    return {
-        "u_wind": u.astype(np.float32),
-        "v_wind": v.astype(np.float32),
-        "cloud_top_height": (h_km * 1000.0).astype(np.float32),
+    del valid
+
+    out = {
+        "u_wind": u.astype(np.float32, copy=False),
+        "v_wind": v.astype(np.float32, copy=False),
         "quality_flag": qf,
-        "sigma_u": sigma_u.astype(np.float32),
-        "sigma_v": sigma_v.astype(np.float32),
-        "sigma_h": (sigma_h_km * 1000.0).astype(np.float32),
     }
+    h_km *= 1000.0
+    out["cloud_top_height"] = h_km.astype(np.float32, copy=False)
+
+    for name, key, scale in (("sigma_u", "u_logvar", 1.0),
+                             ("sigma_v", "v_logvar", 1.0),
+                             ("sigma_h", "h_logvar", 1000.0)):
+        logvar = raw.pop(key)
+        logvar *= 0.5
+        np.exp(logvar, out=logvar)
+        if scale != 1.0:
+            logvar *= scale
+        out[name] = logvar.astype(np.float32, copy=False)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -764,7 +852,11 @@ def infer_satellite(
     logger.info("  Forward pass (%dx%d)...", sat.n_rows, sat.n_cols)
     raw = _forward_full_disk(model, flow_arr, rad_arr, geom_arr,
                              row_strip=row_strip, device=device)
+    # The model inputs are ~3.7 GB for a full disk and are finished with
+    # the moment the forward pass returns.
+    del flow_arr, rad_arr, geom_arr
     amvs = _assemble_vars(raw, finite_mask)
+    del raw
 
     # Compute lat/lon for each pixel
     lat, lon = compute_grid_latlon(sat)
@@ -794,6 +886,150 @@ def infer_satellite(
 # Global mosaic: merge per-satellite datasets on a regular lat/lon grid
 # ---------------------------------------------------------------------------
 
+# Sentinel for "no satellite contributed here" in the source index.
+NO_SOURCE = -1
+
+
+class GlobalMosaic:
+    """Incremental min-zenith mosaic on a regular lat/lon grid.
+
+    Satellites are gridded one at a time and dropped immediately after,
+    so peak memory holds the accumulator plus a single full disk rather
+    than every satellite at once.
+
+    The winning satellite is recorded as an ``int8`` index into
+    :attr:`sources` rather than a string: at 2 km the grid is ~200 M
+    cells, where a ``U12`` string array costs 9 GB against 0.2 GB for
+    the codes.  ``decode_source_satellite`` turns them back into names.
+
+    Parameters
+    ----------
+    resolution_m : output grid spacing in meters (default 2000 m)
+    """
+
+    def __init__(self, resolution_m: float = 2000.0) -> None:
+        # Convert metres to degrees: 1° latitude ≈ 111 320 m
+        dlat = resolution_m / 111_320.0
+        # Use the same angular spacing for longitude; pixels are ~square at
+        # the equator and compress toward the poles (equirectangular).
+        self.resolution_m = resolution_m
+        self.lat_bins = np.arange(-90, 90 + dlat, dlat)
+        self.lon_bins = np.arange(-180, 180 + dlat, dlat)
+        self.lat_centers = 0.5 * (self.lat_bins[:-1] + self.lat_bins[1:])
+        self.lon_centers = 0.5 * (self.lon_bins[:-1] + self.lon_bins[1:])
+        shape = (len(self.lat_centers), len(self.lon_centers))
+        logger.info("Global grid: %d x %d (%.0f m ≈ %.4f°), %.1f GB accumulator",
+                    shape[0], shape[1], resolution_m, dlat,
+                    shape[0] * shape[1] * (4 * (len(OUTPUT_VARS) + 1) + 1) / 2**30)
+
+        self.best_zen = np.full(shape, np.inf, dtype=np.float32)
+        self.merged = {v: np.full(shape, np.nan, dtype=np.float32)
+                       for v in OUTPUT_VARS}
+        self.source_index = np.full(shape, NO_SOURCE, dtype=np.int8)
+        self.sources: list[str] = []
+        self.time: str | None = None
+
+    def add(self, sat_id: str, ds: xr.Dataset) -> int:
+        """Grid one satellite, keeping cells where it beats the zenith so far.
+
+        Returns the number of grid cells this satellite won.
+        """
+        logger.info("Gridding %s onto %.0f m global grid...",
+                    sat_id, self.resolution_m)
+        if self.time is None:
+            self.time = ds.attrs.get("time")
+
+        lat_2d = ds["latitude"].values
+        lon_2d = ds["longitude"].values
+        qf = ds["quality_flag"].values
+
+        # Only grid pixels with valid AMVs
+        valid = (qf >= 2) & np.isfinite(lat_2d) & np.isfinite(lon_2d)
+        n_valid = int(valid.sum())
+        if not n_valid:
+            logger.warning("  %s: no valid pixels to grid", sat_id)
+            return 0
+
+        flat_zen = ds["zenith_angle"].values[valid]
+
+        # Digitize into grid bins, reusing the flattened lat/lon buffers
+        ri = np.digitize(lat_2d[valid], self.lat_bins) - 1
+        ci = np.digitize(lon_2d[valid], self.lon_bins) - 1
+        np.clip(ri, 0, len(self.lat_centers) - 1, out=ri)
+        np.clip(ci, 0, len(self.lon_centers) - 1, out=ci)
+
+        # Where this satellite beats the current best zenith
+        better = flat_zen < self.best_zen[ri, ci]
+        idx_r = ri[better]
+        idx_c = ci[better]
+        del ri, ci
+
+        n_won = int(idx_r.size)
+        if n_won:
+            for var_name in OUTPUT_VARS:
+                # One variable at a time: the flattened copy is freed
+                # before the next is taken.
+                flat_var = ds[var_name].values[valid]
+                self.merged[var_name][idx_r, idx_c] = flat_var[better]
+                del flat_var
+            self.best_zen[idx_r, idx_c] = flat_zen[better]
+            if sat_id not in self.sources:
+                self.sources.append(sat_id)
+            self.source_index[idx_r, idx_c] = self.sources.index(sat_id)
+
+        logger.info("  %s: %d grid cells contributed (of %d valid pixels)",
+                    sat_id, n_won, n_valid)
+        return n_won
+
+    def to_dataset(self) -> xr.Dataset:
+        """Assemble the accumulated grids into the output dataset."""
+        ds_global = xr.Dataset(
+            {v: (("latitude", "longitude"), self.merged[v]) for v in OUTPUT_VARS},
+            coords={
+                "latitude": self.lat_centers,
+                "longitude": self.lon_centers,
+            },
+            attrs={
+                "title": "Global student AMV mosaic",
+                "resolution_m": self.resolution_m,
+                "merge_rule": "minimum zenith angle (closest to sub-satellite point)",
+                "satellites": list(self.sources),
+                "time": self.time,
+            },
+        )
+        ds_global["source_satellite_index"] = (
+            ("latitude", "longitude"), self.source_index,
+        )
+        ds_global["source_satellite_index"].attrs.update({
+            "long_name": "index into the satellites attribute of the "
+                         "satellite that won each cell",
+            "flag_values": list(range(len(self.sources))),
+            "flag_meanings": " ".join(self.sources),
+            # Deliberately not _FillValue/missing_value: either makes
+            # xarray mask on read, promoting the int8 codes to float and
+            # quadrupling what this variable costs a consumer.
+            "no_source_index": NO_SOURCE,
+        })
+        return ds_global
+
+
+def decode_source_satellite(ds: xr.Dataset) -> np.ndarray:
+    """Satellite ids behind ``source_satellite_index``, as a string array.
+
+    Materialised on demand — at 2 km this is a 9 GB array, which is why
+    the mosaic stores codes instead.  Slice the index variable first if
+    you only need a region.
+    """
+    index = ds["source_satellite_index"].values
+    names = ds["source_satellite_index"].attrs.get("flag_meanings", "").split()
+    if not names:
+        names = list(ds.attrs.get("satellites", []))
+    out = np.full(index.shape, "", dtype=f"U{max((len(n) for n in names), default=1)}")
+    for code, name in enumerate(names):
+        out[index == code] = name
+    return out
+
+
 def merge_global(
     per_sat: dict[str, xr.Dataset],
     resolution_m: float = 2000.0,
@@ -803,85 +1039,18 @@ def merge_global(
     At each grid cell, if multiple satellites contribute, the one with
     the smallest zenith angle (closest to the sub-satellite point) wins.
 
+    Holding every satellite in a dict costs ~6 GB of full disks; the
+    pipeline itself streams them through :class:`GlobalMosaic` instead.
+
     Parameters
     ----------
     per_sat : dict mapping satellite_id -> xr.Dataset (from infer_satellite)
     resolution_m : output grid spacing in meters (default 2000 m)
     """
-    # Convert metres to degrees: 1° latitude ≈ 111 320 m
-    dlat = resolution_m / 111_320.0
-    # Use the same angular spacing for longitude; pixels are ~square at the
-    # equator and compress toward the poles (standard equirectangular).
-    dlon = dlat
-
-    lat_bins = np.arange(-90, 90 + dlat, dlat)
-    lon_bins = np.arange(-180, 180 + dlon, dlon)
-    lat_centers = 0.5 * (lat_bins[:-1] + lat_bins[1:])
-    lon_centers = 0.5 * (lon_bins[:-1] + lon_bins[1:])
-    n_lat, n_lon = len(lat_centers), len(lon_centers)
-    logger.info("Global grid: %d x %d (%.0f m ≈ %.4f°)",
-                n_lat, n_lon, resolution_m, dlat)
-
-    # Accumulate: for each grid cell, track the best (lowest zenith) value
-    best_zen = np.full((n_lat, n_lon), np.inf, dtype=np.float32)
-    merged = {v: np.full((n_lat, n_lon), np.nan, dtype=np.float32)
-              for v in OUTPUT_VARS}
-    source_sat = np.full((n_lat, n_lon), "", dtype="U12")
-
+    mosaic = GlobalMosaic(resolution_m=resolution_m)
     for sat_id, ds in per_sat.items():
-        logger.info("Gridding %s onto %.0f m global grid...", sat_id, resolution_m)
-        lat_2d = ds["latitude"].values
-        lon_2d = ds["longitude"].values
-        zen_2d = ds["zenith_angle"].values
-        qf = ds["quality_flag"].values
-
-        # Only grid pixels with valid AMVs
-        valid = (qf >= 2) & np.isfinite(lat_2d) & np.isfinite(lon_2d)
-        if not valid.any():
-            logger.warning("  %s: no valid pixels to grid", sat_id)
-            continue
-
-        flat_lat = lat_2d[valid]
-        flat_lon = lon_2d[valid]
-        flat_zen = zen_2d[valid]
-
-        # Digitize into grid bins
-        ri = np.digitize(flat_lat, lat_bins) - 1
-        ci = np.digitize(flat_lon, lon_bins) - 1
-        np.clip(ri, 0, n_lat - 1, out=ri)
-        np.clip(ci, 0, n_lon - 1, out=ci)
-
-        # Find where this satellite beats the current best zenith
-        better = flat_zen < best_zen[ri, ci]
-        idx_r = ri[better]
-        idx_c = ci[better]
-
-        if len(idx_r) > 0:
-            for var_name in OUTPUT_VARS:
-                flat_var = ds[var_name].values[valid]
-                merged[var_name][idx_r, idx_c] = flat_var[better]
-            best_zen[idx_r, idx_c] = flat_zen[better]
-            source_sat[idx_r, idx_c] = sat_id
-
-        logger.info("  %s: %d grid cells contributed (of %d valid pixels)",
-                     sat_id, int(better.sum()), int(valid.sum()))
-
-    ds_global = xr.Dataset(
-        {v: (("latitude", "longitude"), merged[v]) for v in OUTPUT_VARS},
-        coords={
-            "latitude": lat_centers,
-            "longitude": lon_centers,
-        },
-        attrs={
-            "title": "Global student AMV mosaic",
-            "resolution_m": resolution_m,
-            "merge_rule": "minimum zenith angle (closest to sub-satellite point)",
-            "satellites": list(per_sat.keys()),
-            "time": next(iter(per_sat.values())).attrs["time"],
-        },
-    )
-    ds_global["source_satellite"] = (("latitude", "longitude"), source_sat)
-    return ds_global
+        mosaic.add(sat_id, ds)
+    return mosaic.to_dataset()
 
 
 # ---------------------------------------------------------------------------
@@ -1052,44 +1221,58 @@ def process_time(
     if write_netcdf:
         step_dir.mkdir(parents=True, exist_ok=True)
 
-    per_sat: dict[str, xr.Dataset] = {}
+    # Satellites are gridded as they finish and dropped immediately:
+    # holding all six full disks costs ~6 GB for no benefit.
+    mosaic = None if skip_global else GlobalMosaic(resolution_m=resolution_m)
+    done: list[str] = []
     for sat_id in sats:
         if sat_id not in SATELLITE_CONFIGS:
             logger.warning("Unknown satellite %r, skipping", sat_id)
             continue
         nc_path = sat_nc_path(out_dir, sat_id, t0)
+        ds = None
         if skip_existing and write_netcdf and nc_path.exists():
             logger.info("[%s] %s already exists — reusing %s",
                         tag, sat_id, nc_path)
             try:
-                per_sat[sat_id] = xr.load_dataset(nc_path)
-                continue
+                ds = xr.load_dataset(nc_path)
             except Exception:
                 logger.exception("Failed to read %s — recomputing", nc_path)
+                ds = None
+        if ds is None:
+            try:
+                ds = infer_satellite(
+                    sat_id, t0, model, disp,
+                    flow_bands, rad_bands,
+                    device=device, row_strip=row_strip,
+                )
+                if write_netcdf:
+                    ds.to_netcdf(nc_path)
+                    logger.info("Saved %s", nc_path)
+            except Exception:
+                logger.exception("[%s] Failed to process %s — skipping",
+                                 tag, sat_id)
+                continue
         try:
-            ds = infer_satellite(
-                sat_id, t0, model, disp,
-                flow_bands, rad_bands,
-                device=device, row_strip=row_strip,
-            )
-            if write_netcdf:
-                ds.to_netcdf(nc_path)
-                logger.info("Saved %s", nc_path)
-            per_sat[sat_id] = ds
-        except Exception:
-            logger.exception("[%s] Failed to process %s — skipping", tag, sat_id)
+            if mosaic is not None:
+                mosaic.add(sat_id, ds)
+            done.append(sat_id)
+        finally:
+            ds.close()
+            del ds
+        log_peak_rss(f"[{tag}] after {sat_id}")
 
-    if not per_sat:
+    if not done:
         logger.error("[%s] No satellites produced output.", tag)
         return False
 
     logger.info("[%s] Completed %d/%d satellites: %s",
-                tag, len(per_sat), len(sats), list(per_sat.keys()))
+                tag, len(done), len(sats), done)
 
-    if not skip_global:
-        logger.info("[%s] Building global mosaic (%.0f m grid)...",
+    if mosaic is not None:
+        logger.info("[%s] Assembling global mosaic (%.0f m grid)...",
                     tag, resolution_m)
-        ds_global = merge_global(per_sat, resolution_m=resolution_m)
+        ds_global = mosaic.to_dataset()
 
         if write_netcdf:
             global_path = global_nc_path(out_dir, t0)
@@ -1108,14 +1291,16 @@ def process_time(
                 )
                 icechunk_times.add(t0)
 
-        # Summary stats
-        valid = ds_global["quality_flag"].values >= 2
-        n_valid = int(valid.sum())
-        n_total = valid.size
+        # Summary stats.  Count in place rather than materialising a
+        # full boolean copy of the grid.
+        n_valid = int(np.count_nonzero(ds_global["quality_flag"].values >= 2))
+        n_total = ds_global["quality_flag"].size
         logger.info("[%s] Global mosaic: %d / %d grid cells with valid AMVs "
                     "(%.1f%%)", tag, n_valid, n_total,
                     100 * n_valid / n_total if n_total else 0)
+        del ds_global, mosaic
 
+    log_peak_rss(f"[{tag}] timestamp complete")
     return True
 
 

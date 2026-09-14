@@ -21,6 +21,8 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
+from stereo_winds.readers._cache import default_retention, prune_cache
+
 PRODUCT_TIMESTEPS = {"ABI-L1b-RadF": 10, "ABI-L1b-RadC": 5, "ABI-L1b-RadM": 1}
 _GNUM = {"goes16": "16", "goes17": "17", "goes18": "18", "goes19": "19"}
 
@@ -76,10 +78,12 @@ class GOES:
     product : "ABI-L1b-RadF" (full disk), "ABI-L1b-RadC" (CONUS), "ABI-L1b-RadM"
     bands : list with a single ABI band, e.g. ``["C14"]``
     cache_dir : local download cache (default ~/.cache/stereo_winds)
+    cache_retention : drop cached scans more than this far before the
+        scene being read (default one hour; None keeps everything)
     """
 
     def __init__(self, satellite="goes16", product="ABI-L1b-RadF",
-                 bands=None, cache_dir=None):
+                 bands=None, cache_dir=None, cache_retention=-1):
         self.satellite = satellite
         self.product = product
         self.bands = list(bands) if bands else ["C13"]
@@ -87,6 +91,11 @@ class GOES:
             Path.home() / ".cache" / "stereo_winds")
         self.bucket = f"noaa-{satellite}"
         self.step = PRODUCT_TIMESTEPS.get(product, 10)
+        # Downloads older than this (relative to the scene being read) are
+        # dropped; None keeps everything.  A full-disk ABI band is ~17 MB,
+        # so an unpruned cache fills the disk over a long run.
+        self.cache_retention = (default_retention() if cache_retention == -1
+                                else cache_retention)
         self._fs = None
 
     @property
@@ -121,6 +130,7 @@ class GOES:
             local.parent.mkdir(parents=True, exist_ok=True)
             if not local.exists():
                 self.fs.get(key, str(local))
+            self.prune_download_cache(t)
             raw = xr.open_dataset(local)
         else:
             raw = xr.open_dataset(self.fs.open(key))
@@ -139,7 +149,14 @@ class GOES:
             if not local.exists():
                 self.fs.get(key, str(local))
             paths.append(local)
+        self.prune_download_cache(t)
         return paths
+
+    def prune_download_cache(self, t: dt.datetime) -> None:
+        """Drop cached scans more than ``cache_retention`` before ``t``."""
+        if self.cache_retention is None:
+            return
+        prune_cache(self.cache_dir / self.satellite, t - self.cache_retention)
 
     def __repr__(self):
         return (f"GOES(satellite={self.satellite!r}, product={self.product!r}, "

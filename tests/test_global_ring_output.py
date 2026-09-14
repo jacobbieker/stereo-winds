@@ -5,8 +5,10 @@ dataset so the range walking, deterministic file layout and icechunk
 append/resume behaviour can be exercised without touching the network.
 """
 
+import gc
 import importlib.util
 import sys
+import weakref
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -367,3 +369,111 @@ class TestAvailabilityBand:
 
     def test_none_when_nothing_matches(self):
         assert ring.availability_band("mtg-i1", ["C14"], ["C14"]) is None
+
+
+# ── Mosaic memory behaviour ───────────────────────────────────────────
+
+class TestGlobalMosaic:
+    """The mosaic accumulates satellites one at a time and stores codes."""
+
+    def _sat(self, sat_id, zenith, lon0=0.0, n=6):
+        lat, lon = np.meshgrid(np.linspace(-10, 10, n),
+                               np.linspace(lon0 - 10, lon0 + 10, n),
+                               indexing="ij")
+        data = {v: np.full((n, n), 1.0, np.float32) for v in ring.OUTPUT_VARS}
+        data["quality_flag"] = np.full((n, n), 2.0, np.float32)
+        return xr.Dataset(
+            {v: (("y", "x"), data[v]) for v in ring.OUTPUT_VARS},
+            coords={"latitude": (("y", "x"), lat.astype(np.float32)),
+                    "longitude": (("y", "x"), lon.astype(np.float32)),
+                    "zenith_angle": (("y", "x"),
+                                     np.full((n, n), zenith, np.float32))},
+            attrs={"satellite_id": sat_id, "time": "2026-08-01T00:00:00"},
+        )
+
+    def test_source_is_stored_as_int8_codes(self):
+        """A U12 string array costs 9 GB on the 2 km grid; codes cost 0.2."""
+        mosaic = ring.GlobalMosaic(resolution_m=200_000.0)
+        mosaic.add("goes19", self._sat("goes19", 10.0))
+        ds = mosaic.to_dataset()
+        assert ds["source_satellite_index"].dtype == np.int8
+
+    def test_unfilled_cells_carry_the_sentinel(self):
+        mosaic = ring.GlobalMosaic(resolution_m=200_000.0)
+        mosaic.add("goes19", self._sat("goes19", 10.0))
+        ds = mosaic.to_dataset()
+        assert (ds["source_satellite_index"].values == ring.NO_SOURCE).any()
+        assert ds["source_satellite_index"].attrs["no_source_index"] == ring.NO_SOURCE
+
+    def test_decodes_back_to_names(self):
+        mosaic = ring.GlobalMosaic(resolution_m=200_000.0)
+        mosaic.add("goes19", self._sat("goes19", 10.0))
+        mosaic.add("goes18", self._sat("goes18", 20.0, lon0=40.0))
+        names = ring.decode_source_satellite(mosaic.to_dataset())
+        assert set(names[names != ""]) == {"goes18", "goes19"}
+
+    def test_lowest_zenith_wins_the_overlap(self):
+        mosaic = ring.GlobalMosaic(resolution_m=200_000.0)
+        mosaic.add("far", self._sat("far", 40.0))
+        mosaic.add("near", self._sat("near", 5.0))      # same footprint
+        names = ring.decode_source_satellite(mosaic.to_dataset())
+        assert set(names[names != ""]) == {"near"}
+
+    def test_order_does_not_matter(self):
+        a = ring.GlobalMosaic(resolution_m=200_000.0)
+        a.add("far", self._sat("far", 40.0))
+        a.add("near", self._sat("near", 5.0))
+        b = ring.GlobalMosaic(resolution_m=200_000.0)
+        b.add("near", self._sat("near", 5.0))
+        b.add("far", self._sat("far", 40.0))
+        assert np.array_equal(
+            ring.decode_source_satellite(a.to_dataset()),
+            ring.decode_source_satellite(b.to_dataset()))
+
+    def test_matches_the_dict_api(self):
+        """merge_global is the same accumulator, fed from a dict."""
+        per_sat = {"far": self._sat("far", 40.0), "near": self._sat("near", 5.0)}
+        merged = ring.merge_global(per_sat, resolution_m=200_000.0)
+        mosaic = ring.GlobalMosaic(resolution_m=200_000.0)
+        for k, v in per_sat.items():
+            mosaic.add(k, v)
+        streamed = mosaic.to_dataset()
+        for var in ring.OUTPUT_VARS:
+            assert np.array_equal(merged[var].values, streamed[var].values,
+                                  equal_nan=True)
+
+    def test_empty_satellite_is_skipped(self):
+        mosaic = ring.GlobalMosaic(resolution_m=200_000.0)
+        blank = self._sat("blank", 10.0)
+        blank["quality_flag"][:] = 0.0
+        assert mosaic.add("blank", blank) == 0
+        assert mosaic.to_dataset().attrs["satellites"] == []
+
+    def test_netcdf_roundtrip_keeps_int8(self, tmp_path):
+        """_FillValue would make xarray mask on read and promote to float."""
+        mosaic = ring.GlobalMosaic(resolution_m=200_000.0)
+        mosaic.add("goes19", self._sat("goes19", 10.0))
+        path = tmp_path / "mosaic.nc"
+        mosaic.to_dataset().to_netcdf(path)
+        back = xr.open_dataset(path)
+        assert back["source_satellite_index"].dtype == np.int8
+        assert set(ring.decode_source_satellite(back).ravel()) >= {"goes19"}
+
+
+class TestStreamingProcess:
+    """process_time must not retain satellites once they are gridded."""
+
+    def test_datasets_are_released_after_gridding(self, tmp_path, monkeypatch):
+        alive: list = []
+
+        def fake(sat_id, t0, *a, **k):
+            ds = _fake_scene(sat_id, t0)
+            alive.append(weakref.ref(ds))
+            return ds
+
+        monkeypatch.setattr(ring, "infer_satellite", fake)
+        _run(T0, tmp_path, resolution_m=200_000.0, write_netcdf=False)
+        gc.collect()
+        leaked = [r for r in alive if r() is not None]
+        assert alive, "no satellites were processed"
+        assert not leaked, f"{len(leaked)} satellite dataset(s) still resident"
