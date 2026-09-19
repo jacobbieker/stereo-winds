@@ -47,7 +47,7 @@ from operational.resources import (  # noqa: E402
     PathsResource,
     RunSettingsResource,
 )
-from operational.tests.conftest import SUB_LON, synthetic_scene  # noqa: E402
+from operational.tests.conftest import SUB_LON_DEG, synthetic_scene  # noqa: E402
 
 pytestmark = pytest.mark.integration
 
@@ -157,7 +157,7 @@ def _first_keys(n: int = 2) -> list[str]:
 #: The satellites this test drives, taken from the shipped config so the
 #: test follows the ring rather than a private list of its own.
 SATS = [s for s in DEFAULT_CONFIG.satellites
-        if s in SUB_LON and _has_asset(s)][:4]
+        if s in SUB_LON_DEG and _has_asset(s)][:4]
 
 
 class RingStub:
