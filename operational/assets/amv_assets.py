@@ -191,7 +191,7 @@ def build_amv_asset(
         context: AssetExecutionContext,
         paths: PathsResource,
         model: ModelResource,
-        settings: RunSettingsResource,
+        run_settings: RunSettingsResource,
     ) -> MaterializeResult:
         partition_key = context.partition_key
         t0 = time_for(partition_key)
@@ -202,7 +202,7 @@ def build_amv_asset(
         # partition of a resumed backfill.  The retrieval re-checks the file
         # itself; this only decides whether the model is worth resolving.
         reuse_expected = (
-            settings.skip_existing
+            run_settings.skip_existing
             and _existing_output(paths.output_dir, sat_id, t0).exists()
         )
         if reuse_expected:
@@ -215,12 +215,12 @@ def build_amv_asset(
             t0,
             loaded_model,
             loaded_disp,
-            list(settings.flow_bands),
-            list(settings.rad_bands),
+            list(run_settings.flow_bands),
+            list(run_settings.rad_bands),
             paths.output_dir,
             device=model.device,
             row_strip=model.row_strip,
-            skip_existing=settings.skip_existing,
+            skip_existing=run_settings.skip_existing,
         )
 
         if result.quality_degraded:

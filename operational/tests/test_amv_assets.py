@@ -32,6 +32,7 @@ from operational.assets.amv_assets import (
     build_amv_assets,
 )
 from operational.core.amv import AmvResult
+from operational.tests.conftest import synthetic_scene
 from operational.core.partitions import build_partitions_def, key_for
 from operational.resources import ModelResource, PathsResource, RunSettingsResource
 
@@ -78,7 +79,7 @@ def resources(tmp_path: Path) -> dict[str, object]:
         "model": FakeModelResource(
             student_ckpt="student.ckpt", raft_ckpt="raft.ckpt", device="cpu",
         ),
-        "settings": RunSettingsResource(satellites=list(SATELLITES)),
+        "run_settings": RunSettingsResource(satellites=list(SATELLITES)),
     }
 
 
@@ -95,7 +96,15 @@ def fake_result(sat_id: str, t0: datetime, out_dir: Path, **kwargs) -> AmvResult
     path = Path(out_dir) / t0.strftime("%Y%m%d") / (
         f"student_amv_{sat_id}_{t0:%Y%m%dT%H%M}.nc"
     )
-    return AmvResult(sat_id=sat_id, timestamp=t0, path=path, **kwargs)
+    fields = dict(
+        dataset=synthetic_scene(sat_id, t0),
+        reused=False,
+        n_bands_missing=0,
+        bands_missing=(),
+        quality_degraded=False,
+    )
+    fields.update(kwargs)
+    return AmvResult(sat_id=sat_id, timestamp=t0, path=path, **fields)
 
 
 def record_calls(monkeypatch, *, raises: dict[str, Exception] | None = None,
@@ -219,15 +228,15 @@ class TestMaterialize:
         assert call["disp"] == "fake-disparity"
         assert call["output_dir"] == resources["paths"].output_dir
         assert call["device"] == "cpu"
-        assert call["flow_bands"] == resources["settings"].flow_bands
-        assert call["rad_bands"] == resources["settings"].rad_bands
+        assert call["flow_bands"] == resources["run_settings"].flow_bands
+        assert call["rad_bands"] == resources["run_settings"].rad_bands
         assert call["skip_existing"] is True
 
     def test_skip_existing_is_operator_controlled(
         self, assets, resources, monkeypatch,
     ):
         calls = record_calls(monkeypatch)
-        resources["settings"] = RunSettingsResource(skip_existing=False)
+        resources["run_settings"] = RunSettingsResource(skip_existing=False)
         materialize(
             [assets["gk2a"]], partition_key=PARTITION_KEY, resources=resources,
         )
@@ -397,6 +406,8 @@ class TestIdempotence:
                 path.write_bytes(b"netcdf")
             return AmvResult(
                 sat_id=sat_id, timestamp=t0, path=path, reused=reused,
+                dataset=synthetic_scene(sat_id, t0), n_bands_missing=0,
+                bands_missing=(), quality_degraded=False,
             )
 
         monkeypatch.setattr(amv_assets, "run_satellite_amv", _fake)
