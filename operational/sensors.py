@@ -88,7 +88,12 @@ from operational.core.watermark import WatermarkStore
 logger = logging.getLogger(__name__)
 
 DEFAULT_SENSOR_NAME = "amv_availability_sensor"
-DEFAULT_JOB_NAME = "amv_pipeline_job"
+#: Job this sensor requests runs of.  Must match the name the job
+#: is actually defined under (``jobs.FULL_JOB_NAME``); dagster
+#: rejects the whole repository if a sensor targets a job that
+#: does not exist.  Kept as a string so this module stays below
+#: jobs.py in the dependency order.
+DEFAULT_JOB_NAME = "operational_ring_job"
 DEFAULT_LOOKBACK_HOURS = 6.0
 DEFAULT_MINIMUM_INTERVAL_SECONDS = 300
 WATERMARK_FILENAME = "watermarks.json"

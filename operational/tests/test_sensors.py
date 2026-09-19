@@ -171,11 +171,11 @@ class TestAvailabilitySensorEmission:
             return None
 
         @job(partitions_def=HourlyPartitionsDefinition(start_date="2026-01-01-00:00"))
-        def amv_pipeline_job():
+        def operational_ring_job():
             noop()
 
         sensor_def = make_sensor(sensor_config, wm_path)
-        defs = Definitions(jobs=[amv_pipeline_job], sensors=[sensor_def])
+        defs = Definitions(jobs=[operational_ring_job], sensors=[sensor_def])
         context = build_sensor_context(
             sensor_name=sensor_def.name, repository_def=defs.get_repository_def()
         )
