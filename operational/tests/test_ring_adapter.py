@@ -12,11 +12,10 @@ from datetime import datetime
 from pathlib import Path
 from types import ModuleType
 
-import numpy as np
 import pytest
-import xarray as xr
 
 from operational.adapters import ring
+from operational.tests.conftest import synthetic_scene
 
 T0 = datetime(2026, 8, 1, 0, 0)
 
@@ -37,6 +36,11 @@ REEXPORTS = (
     "DT_MINUTES",
     "SCAN_INTERVAL_MINUTES",
 )
+
+#: Mutable constants, re-exported as defensive copies.
+COPIED_REEXPORTS = ("RING_SATELLITES", "OUTPUT_VARS", "SCAN_INTERVAL_MINUTES")
+#: Everything else, re-exported as the script's own object.
+SHARED_REEXPORTS = tuple(n for n in REEXPORTS if n not in COPIED_REEXPORTS)
 
 
 class TestScriptLocation:
@@ -111,7 +115,7 @@ class TestLoadRing:
         monkeypatch.setattr(ring, "_RING_MODULE", None)
 
         seen: list[ModuleType] = []
-        start = threading.Barrier(8)
+        start = threading.Barrier(8, timeout=10)
 
         def worker():
             start.wait()
@@ -121,7 +125,9 @@ class TestLoadRing:
         for t in threads:
             t.start()
         for t in threads:
-            t.join()
+            t.join(timeout=10)
+        alive = [t for t in threads if t.is_alive()]
+        assert not alive, "load_ring deadlocked"
 
         assert calls == [1]
         assert seen == [sentinel] * 8
@@ -152,15 +158,29 @@ class TestLoadRing:
 
 
 class TestReexports:
-    """Every promised name is present, and is the script's own object."""
+    """Every promised name is present, correct and wired to the script."""
 
     @pytest.mark.parametrize("name", REEXPORTS)
     def test_present_on_the_adapter(self, name):
         assert hasattr(ring, name), f"{name} missing from the adapter"
 
-    @pytest.mark.parametrize("name", REEXPORTS)
+    @pytest.mark.parametrize("name", SHARED_REEXPORTS)
     def test_is_the_script_object(self, name):
         assert getattr(ring, name) is getattr(ring.load_ring(), name)
+
+    @pytest.mark.parametrize("name", COPIED_REEXPORTS)
+    def test_mutable_constants_equal_but_do_not_alias_the_script(self, name):
+        script_value = getattr(ring.load_ring(), name)
+        assert getattr(ring, name) == script_value
+        assert getattr(ring, name) is not script_value
+
+    def test_mutating_a_constant_cannot_corrupt_the_script(self):
+        script = ring.load_ring()
+        ring.OUTPUT_VARS.append("source_satellite_index")
+        try:
+            assert "source_satellite_index" not in script.OUTPUT_VARS
+        finally:
+            ring.OUTPUT_VARS.remove("source_satellite_index")
 
     @pytest.mark.parametrize("name", REEXPORTS)
     def test_listed_in_dunder_all(self, name):
@@ -233,7 +253,8 @@ class TestPureHelpers:
 
     def test_global_mosaic_constructs_and_accumulates(self):
         mosaic = ring.GlobalMosaic(resolution_m=200_000.0)
-        assert mosaic.add("goes18", _scene("goes18", zenith=10.0)) > 0
+        scene = synthetic_scene("goes18", T0, ny=16, nx=16, zenith=10.0)
+        assert mosaic.add("goes18", scene) > 0
         ds = mosaic.to_dataset()
         for var in ring.OUTPUT_VARS:
             assert var in ds
@@ -257,21 +278,33 @@ class TestMissingNameGuard:
         assert ring._require(stub, "DT_MINUTES") == 7
 
 
-def _scene(sat_id: str, zenith: float, ny: int = 16, nx: int = 16):
-    """A tiny synthetic AMV scene, shaped like ``infer_satellite`` output."""
-    lat, lon = np.meshgrid(
-        np.linspace(-20, 20, ny), np.linspace(-30, 30, nx), indexing="ij",
-    )
-    data = {k: np.full((ny, nx), 1.0, np.float32) for k in ring.OUTPUT_VARS}
-    data["quality_flag"] = np.full((ny, nx), 2.0, np.float32)
-    return xr.Dataset(
-        {k: (("y", "x"), data[k]) for k in ring.OUTPUT_VARS},
-        coords={
-            "latitude": (("y", "x"), lat.astype(np.float32)),
-            "longitude": (("y", "x"), lon.astype(np.float32)),
-            "zenith_angle": (
-                ("y", "x"), np.full((ny, nx), zenith, np.float32),
-            ),
-        },
-        attrs={"satellite_id": sat_id, "time": str(T0)},
-    )
+class TestRequiredNames:
+    """The checked name list and the re-export list cannot drift apart."""
+
+    def test_covers_exactly_the_reexports(self):
+        assert set(ring._REQUIRED_NAMES) == set(REEXPORTS)
+
+    def test_check_required_passes_for_the_real_script(self):
+        ring._check_required(ring.load_ring())
+
+    def test_check_required_names_every_casualty(self):
+        stub = ModuleType("partial_ring")
+        stub.DT_MINUTES = 10
+        with pytest.raises(AttributeError) as exc:
+            ring._check_required(stub)
+        message = str(exc.value)
+        assert "infer_satellite" in message
+        assert "GlobalMosaic" in message
+        assert "DT_MINUTES" not in message
+
+
+class TestScriptOverride:
+    """The script path honours the repo's env-var convention."""
+
+    def test_env_var_name(self):
+        assert ring.RING_SCRIPT_ENV == "STEREO_WINDS_RING_SCRIPT"
+
+    def test_default_is_the_checkout_script(self):
+        assert ring.RING_SCRIPT == (
+            ring.REPO_ROOT / "scripts" / "infer_student_global_ring.py"
+        )
