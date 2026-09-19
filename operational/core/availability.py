@@ -67,8 +67,11 @@ def _nearest_scan(
 ) -> np.ndarray:
     """Index of the nearest scan to each target, or ``-1`` if none is close.
 
-    Ties go to the earlier scan, matching the readers' snap-to-nearest
-    behaviour.
+    A target equidistant between two different scans that are both in
+    tolerance is *ambiguous* and returns ``-1``: this module and the
+    readers each pick a nearest scan independently, so a tie is a frame
+    whose identity cannot be predicted here — and two frames breaking the
+    tie in opposite directions load the same scan twice.
 
     Parameters
     ----------
@@ -82,7 +85,8 @@ def _nearest_scan(
     Returns
     -------
     ndarray of int
-        Same shape as ``targets``; ``-1`` where no scan is within ``tol``.
+        Same shape as ``targets``; ``-1`` where no scan is within ``tol``
+        or the nearest scan is ambiguous.
     """
     if scan_times.size == 0 or targets.size == 0:
         return np.full(targets.shape, -1, dtype=np.int64)
@@ -92,10 +96,12 @@ def _nearest_scan(
     right = np.clip(idx, 0, scan_times.size - 1)
     d_left = np.abs(scan_times[left] - targets)
     d_right = np.abs(scan_times[right] - targets)
-    # ``<=`` keeps the earlier scan on a tie.
     best = np.where(d_left <= d_right, left, right)
     best_dist = np.minimum(d_left, d_right)
-    return np.where(best_dist <= tol, best, -1).astype(np.int64)
+    # A tie between two *distinct* scans, both in tolerance, is ambiguous;
+    # when the clips collapse both sides onto one scan it is not.
+    ambiguous = (left != right) & (d_left == d_right) & (d_right <= tol)
+    return np.where((best_dist <= tol) & ~ambiguous, best, -1).astype(np.int64)
 
 
 # ``eq=False`` keeps identity semantics: the dataclass holds a numpy
@@ -149,11 +155,12 @@ class SatelliteAvailability:
     def deliverable(self, candidates: Sequence[datetime]) -> list[datetime]:
         """Subset of ``candidates`` with a full ``(t-dt, t, t+dt)`` triplet.
 
-        The three frames must match three *distinct* scans.  Tolerance is
-        typically half the repeat cycle, so without that check a sparse
-        schedule can satisfy two frames with the same scan — the readers
-        then snap both to it and the student sees a duplicated frame, i.e.
-        near-zero displacement, rather than a failure.
+        The three frames must match three *distinct*, unambiguously
+        nearest scans.  Tolerance is typically half the repeat cycle, so
+        without those checks a sparse or half-offset schedule can satisfy
+        two frames with the same scan — the readers then snap both to it
+        and the student sees a duplicated frame, i.e. near-zero
+        displacement, rather than a failure.
 
         Parameters
         ----------

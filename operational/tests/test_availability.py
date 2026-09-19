@@ -221,13 +221,48 @@ class TestTolerance:
             "goes19", None, T0 + timedelta(minutes=50), ["C14"], ["C14"],
             tolerance_minutes=2.0, **kwargs) == []
 
-    def test_tolerance_is_inclusive_at_the_edge(self, stub_availability):
-        stub_availability["goes19"] = _every(10, 7, offset_seconds=300)
+    def test_tolerance_is_inclusive_at_the_edge(self):
+        """A scan exactly ``tolerance`` away still counts."""
         slot = T0 + timedelta(minutes=20)
+        # Frames 00:10/00:20/00:30 match 00:05/00:20/00:35 at exactly
+        # 5/0/5 minutes, and each nearest scan is unambiguous (the runner
+        # up is 10 minutes away).
+        scans = [T0 + timedelta(minutes=5), slot, T0 + timedelta(minutes=35)]
+        assert SatelliteAvailability(
+            "goes19", "C14", _t64(*scans), 10, 5.0).can_deliver(slot) is True
+        assert SatelliteAvailability(
+            "goes19", "C14", _t64(*scans), 10, 4.99).can_deliver(slot) is False
+
+    def test_equidistant_scans_are_ambiguous(self):
+        """A frame tied between two scans cannot be resolved here.
+
+        This module and the readers each snap independently, so a tie is
+        a frame whose identity is unpredictable — and two frames breaking
+        it in opposite directions would load the same scan twice.
+        """
+        # Every frame of the HH:20 slot sits 5 min from two scans.
+        avail = SatelliteAvailability(
+            "goes19", "C14",
+            _t64(*[T0 + timedelta(minutes=10 * i, seconds=300)
+                   for i in range(7)]), 10, 5.0)
+        assert avail.can_deliver(T0 + timedelta(minutes=20)) is False
+
+    def test_offset_cadence_over_a_10_minute_satellite_is_rejected(
+            self, stub_availability):
+        """A 15-min cadence on a 10-min satellite half-offsets every slot.
+
+        HH:15 would otherwise be declared ready off the HH:00/HH:10/HH:20
+        scans while the loader asks for HH:05/HH:15/HH:25 and can snap two
+        of them onto one scan — a duplicated frame, i.e. a near-zero
+        displacement, reported silently as a retrieval.
+        """
+        stub_availability["goes19"] = _every(10, 13)
         got = new_timestamps(
-            "goes19", None, T0 + timedelta(minutes=50), ["C14"], ["C14"],
-            cadence_minutes=10, tolerance_minutes=5.0, lookback_hours=1.0)
-        assert slot in got
+            "goes19", None, T0 + timedelta(minutes=120), ["C14"], ["C14"],
+            cadence_minutes=15, tolerance_minutes=5.0, lookback_hours=2.0)
+        assert got  # the on-grid slots survive
+        assert all(t.minute % 10 == 0 for t in got)
+        assert T0 + timedelta(minutes=15) not in got
 
 
 class TestNewTimestamps:
