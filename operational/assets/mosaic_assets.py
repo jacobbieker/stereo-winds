@@ -305,7 +305,14 @@ def build_mosaic_assets(
                 },
             )
 
-        ds_global = build_mosaic(per_sat, t0, resolution_m=run_settings.resolution_m)
+        # `expected` is what lets the mosaic know a satellite is absent:
+        # without it build_mosaic can only see the scenes it was handed,
+        # so a failed satellite left no trace in the file's attributes
+        # and every mosaic looked complete.
+        ds_global = build_mosaic(
+            per_sat, t0, resolution_m=run_settings.resolution_m,
+            expected=expected,
+        )
         loaded = sorted(per_sat)
         # The per-satellite datasets are full disks; let them go before the
         # mosaic is serialised.
