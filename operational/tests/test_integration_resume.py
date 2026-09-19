@@ -26,13 +26,14 @@ import xarray as xr
 pytest.importorskip("icechunk")
 pytest.importorskip("dagster")
 
-from dagster import materialize  # noqa: E402
+from dagster import RetryPolicy, materialize  # noqa: E402
 
 from operational.adapters import ring  # noqa: E402
 from operational.assets.amv_assets import (  # noqa: E402
     AMV_ASSETS,
     AMV_ASSETS_BY_SAT,
     AMV_PARTITIONS_DEF,
+    build_amv_assets,
 )
 from operational.assets.mosaic_assets import (  # noqa: E402
     global_mosaic,
@@ -159,6 +160,17 @@ def _first_keys(n: int = 2) -> list[str]:
 SATS = [s for s in DEFAULT_CONFIG.satellites
         if s in SUB_LON_DEG and _has_asset(s)][:4]
 
+#: Rebuilt without retries.  The shipped assets retry twice with a 30 s
+#: exponential backoff, which is right in production but would make the
+#: deliberate failure below take minutes of sleeping and turn "attempted
+#: once" into "attempted three times".  Retry behaviour itself is
+#: covered by the AMV asset's own tests; this file is about containment
+#: and resume.
+AMV_ASSETS_BY_SAT = build_amv_assets(
+    tuple(SATS), AMV_PARTITIONS_DEF, retry_policy=RetryPolicy(max_retries=0),
+)
+AMV_ASSETS = list(AMV_ASSETS_BY_SAT.values())
+
 
 class RingStub:
     """Stands in for the student model, and can be told to fail.
@@ -215,6 +227,10 @@ class TestFailureAndResume:
         if hasattr(amv_module, "infer_satellite"):
             monkeypatch.setattr(amv_module, "infer_satellite",
                                 stub.infer_satellite, raising=False)
+        # The asset resolves the model before it calls the retrieval,
+        # so the stub alone still demands a real checkpoint.
+        monkeypatch.setattr(ModelResource, "model", lambda self: None)
+        monkeypatch.setattr(ModelResource, "disparity", lambda self: None)
         return stub
 
     @pytest.fixture
@@ -225,7 +241,7 @@ class TestFailureAndResume:
         resources = {
             "paths": paths,
             "model": ModelResource(device="cpu"),
-            "settings": RunSettingsResource(
+            "run_settings": RunSettingsResource(
                 satellites=list(SATS),
                 resolution_m=TEST_RESOLUTION_M,
                 skip_existing=True,
@@ -278,12 +294,14 @@ class TestFailureAndResume:
             "every healthy satellite should still have materialized")
 
         for sat_id in healthy:
-            path = paths.sat_nc(sat_id, t0)
+            path = paths.sat_path(sat_id, t0)
             assert path.exists(), f"{sat_id} left no retrieval at {path}"
             metadata = _metadata(result, _amv_node(sat_id))
             assert metadata["reused"] is False
-            assert metadata["n_valid"] > 0
-        assert not paths.sat_nc(fail_sat, t0).exists(), (
+            # The AMV asset reports band coverage; cell counts are the
+            # mosaic's metric, not this step's.
+            assert metadata["n_bands_missing"] == 0
+        assert not paths.sat_path(fail_sat, t0).exists(), (
             "a failed retrieval must not leave a file behind")
 
         # Every satellite was attempted exactly once.
@@ -294,11 +312,11 @@ class TestFailureAndResume:
         assert result.success
 
         metadata = _metadata(result, "global_mosaic")
-        assert _sat_names(metadata["satellites"]) == healthy
-        assert _sat_names(metadata["satellites_missing"]) == [fail_sat]
+        assert _sat_names(metadata["contributing_satellites"]) == healthy
+        assert _sat_names(metadata["missing_satellites"]) == [fail_sat]
         assert fail_sat in metadata["quality_note"]
 
-        mosaic_path = paths.global_nc(t0)
+        mosaic_path = paths.mosaic_path(t0)
         assert mosaic_path.exists()
         with xr.open_dataset(mosaic_path) as ds_mosaic:
             assert _sat_names(ds_mosaic.attrs["satellites"]) == healthy
@@ -319,44 +337,44 @@ class TestFailureAndResume:
         # -- 3. Resume is cheap and surgical ------------------------------
         stub.failing = set()
         before = dict(stub.calls)
-        untouched = {s: _fingerprint(paths.sat_nc(s, t0)) for s in healthy}
+        untouched = {s: _fingerprint(paths.sat_path(s, t0)) for s in healthy}
 
         result = run([_amv_key(fail_sat)], key0)
         assert result.success
-        assert paths.sat_nc(fail_sat, t0).exists()
+        assert paths.sat_path(fail_sat, t0).exists()
 
         metadata = _metadata(result, _amv_node(fail_sat))
         assert metadata["reused"] is False, (
             "the previously failed satellite had nothing to reuse")
-        assert metadata["n_valid"] > 0
+        assert metadata["n_bands_missing"] == 0
 
         assert stub.calls[fail_sat] == before[fail_sat] + 1
         for sat_id in healthy:
             assert stub.calls[sat_id] == before[sat_id], (
                 f"{sat_id} was recomputed during the resume of {fail_sat}")
-            assert _fingerprint(paths.sat_nc(sat_id, t0)) == untouched[sat_id], (
+            assert _fingerprint(paths.sat_path(sat_id, t0)) == untouched[sat_id], (
                 f"{sat_id}'s retrieval was rewritten by the resume of "
                 f"{fail_sat}")
 
         # Re-running the whole ring for this timestamp now costs nothing:
         # every satellite is reused from disk, untouched.
         before = dict(stub.calls)
-        untouched = {s: _fingerprint(paths.sat_nc(s, t0)) for s in SATS}
+        untouched = {s: _fingerprint(paths.sat_path(s, t0)) for s in SATS}
         result = run(amv_selection, key0)
         assert result.success
         assert stub.calls == before, (
             "a re-run of an already-complete timestamp must not infer again")
         for sat_id in SATS:
             assert _metadata(result, _amv_node(sat_id))["reused"] is True
-            assert _fingerprint(paths.sat_nc(sat_id, t0)) == untouched[sat_id]
+            assert _fingerprint(paths.sat_path(sat_id, t0)) == untouched[sat_id]
 
         # The repaired timestamp mosaics and publishes with the full ring.
         result = run([MOSAIC_KEY, PUBLISH_KEY], key0)
         assert result.success
 
         metadata = _metadata(result, "global_mosaic")
-        assert _sat_names(metadata["satellites"]) == SATS
-        assert _sat_names(metadata["satellites_missing"]) == []
+        assert _sat_names(metadata["contributing_satellites"]) == SATS
+        assert _sat_names(metadata["missing_satellites"]) == []
 
         metadata = _metadata(result, "published_mosaic")
         assert metadata["written"] is True
