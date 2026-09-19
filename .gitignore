@@ -70,3 +70,6 @@ wandb/
 # pixi environments
 .pixi/*
 !.pixi/config.toml
+
+# Local icechunk stores (large binary data)
+*.icechunk/

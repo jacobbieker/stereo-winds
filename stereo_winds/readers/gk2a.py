@@ -129,6 +129,9 @@ class GK2A(GeoStoreReader):
     default_band = "IR112"
 
     store_template = "geo/gk2a_{resolution}.icechunk"
+    # Newer ingests land in separately named stores; consider
+    # them when the named one lacks the band or the coverage.
+    store_discovery_prefix = "gk2a_"
     scan_interval_minutes = _FULL_DISK_MINUTES
 
     coord_names = {

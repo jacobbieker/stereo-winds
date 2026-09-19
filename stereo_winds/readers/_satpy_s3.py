@@ -22,6 +22,7 @@ Requires ``satpy`` and ``s3fs``.
 
 from __future__ import annotations
 
+import bz2
 import contextlib
 import datetime as dt
 import logging
@@ -123,46 +124,73 @@ def _quiet_nan_arithmetic():
         yield
 
 
+def _decompress(paths: list[Path], scratch: Path) -> list[Path]:
+    """Expand any bz2 inputs into ``scratch``; pass other files through.
+
+    Doing this ourselves rather than letting satpy do it matters under
+    concurrency: satpy decompresses into ``satpy.config["tmp_dir"]``,
+    which is process-global, so parallel loads would land in each
+    other's scratch directories and delete files still being read.
+    Segments expand independently, so they expand together.
+    """
+    resolved: list[Path] = []
+    todo: list[tuple[Path, Path]] = []
+    for path in paths:
+        if path.suffix == ".bz2":
+            target = scratch / path.with_suffix("").name
+            todo.append((path, target))
+            resolved.append(target)
+        else:
+            resolved.append(path)
+    if not todo:
+        return resolved
+
+    def expand(item: tuple[Path, Path]) -> None:
+        source, target = item
+        with bz2.open(source, "rb") as src, open(target, "wb") as dst:
+            shutil.copyfileobj(src, dst, length=1 << 20)
+
+    workers = min(len(todo), download_workers())
+    if workers > 1:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(expand, todo))
+    else:
+        for item in todo:
+            expand(item)
+    return resolved
+
+
 def load_scene_array(
     reader: str, paths: list[Path], band: str,
     scratch_dir: Path | None = None,
 ):
     """Load one band from local L1b files, returning an in-memory DataArray.
 
-    AHI ships its HSD segments bz2-compressed, and satpy decompresses
-    each one into ``satpy.config["tmp_dir"]`` — ``/tmp`` by default.  It
-    removes them in the file handler's ``__del__``, which only runs when
-    the handler is garbage collected, so across a long run the
-    decompressed segments (~40 MB per band per slot) accumulate until
-    ``/tmp`` fills and the process dies.
+    AHI ships its HSD segments bz2-compressed.  They are expanded into a
+    scratch directory of our own and removed as soon as the scene is
+    read, so nothing accumulates: satpy's own decompression writes to
+    ``/tmp`` and only unlinks in a finalizer that runs at garbage
+    collection, which across a long run fills the disk.
 
-    So: point satpy at a scratch directory of our own, force the data
-    into memory while the decompressed files still exist, and delete the
-    directory outright afterwards.  Cleanup does not depend on when — or
-    whether — satpy's handlers are collected.
+    The data is materialised before the scratch directory goes away —
+    the returned array must not be lazily backed by files we are about
+    to delete.
     """
-    import satpy
     from satpy import Scene
 
     base = Path(scratch_dir) if scratch_dir else default_cache_dir()
     base.mkdir(parents=True, exist_ok=True)
-    tmp_dir = tempfile.mkdtemp(prefix="satpy-scratch-", dir=str(base))
+    tmp_dir = Path(tempfile.mkdtemp(prefix="satpy-scratch-", dir=str(base)))
     try:
-        with satpy.config.set(tmp_dir=tmp_dir), _quiet_nan_arithmetic():
-            scn = Scene(reader=reader, filenames=[str(p) for p in paths])
+        local = _decompress(list(paths), tmp_dir)
+        with _quiet_nan_arithmetic():
+            scn = Scene(reader=reader, filenames=[str(p) for p in local])
             scn.load([band])
-            # compute() while the decompressed segments are still on
-            # disk: the returned array must not be lazily backed by
-            # files we are about to delete.
             da = scn[band].compute()
         del scn
         return da
     finally:
-        leftover = sum(1 for _ in Path(tmp_dir).rglob("*"))
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        if leftover:
-            logger.debug("Removed %d satpy scratch file(s) from %s",
-                         leftover, tmp_dir)
 
 
 # CF grid-mapping key -> the proj-style key the metadata reader expects.

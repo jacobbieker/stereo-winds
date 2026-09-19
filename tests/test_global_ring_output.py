@@ -477,3 +477,163 @@ class TestStreamingProcess:
         leaked = [r for r in alive if r() is not None]
         assert alive, "no satellites were processed"
         assert not leaked, f"{len(leaked)} satellite dataset(s) still resident"
+
+
+class TestMosaicGrid:
+    """The grid is defined arithmetically so binning can be too."""
+
+    @pytest.mark.parametrize("res", [2000.0, 4000.0, 10000.0, 50000.0, 200000.0])
+    def test_cell_count_matches_the_arange_definition(self, res):
+        """Switching to exact edges must not resize the output grid."""
+        step = res / 111_320.0
+        mosaic = ring.GlobalMosaic(resolution_m=res)
+        assert len(mosaic.lat_centers) == len(np.arange(-90, 90 + step, step)) - 1
+        assert len(mosaic.lon_centers) == len(np.arange(-180, 180 + step, step)) - 1
+
+    def test_edges_are_exact_multiples_of_the_step(self):
+        mosaic = ring.GlobalMosaic(resolution_m=10000.0)
+        expected = -90.0 + np.arange(len(mosaic.lat_bins)) * mosaic.step_deg
+        assert np.array_equal(mosaic.lat_bins, expected)
+
+    def test_bin_index_agrees_with_digitize(self):
+        """Arithmetic indexing replaced np.digitize; it must place identically."""
+        mosaic = ring.GlobalMosaic(resolution_m=10000.0)
+        rng = np.random.default_rng(0)
+        lat = rng.uniform(-89.9, 89.9, 200_000).astype(np.float32)
+        n_lat = len(mosaic.lat_centers)
+        expected = np.clip(np.digitize(lat, mosaic.lat_bins) - 1, 0, n_lat - 1)
+        assert np.array_equal(
+            mosaic._bin_index(lat, mosaic.lat_bins[0], n_lat), expected)
+
+    def test_points_on_a_cell_edge_land_in_that_cell(self):
+        mosaic = ring.GlobalMosaic(resolution_m=10000.0)
+        n_lat = len(mosaic.lat_centers)
+        edges = mosaic.lat_bins[10:14]
+        idx = mosaic._bin_index(edges.astype(np.float64), mosaic.lat_bins[0], n_lat)
+        assert idx.tolist() == [10, 11, 12, 13]
+
+    def test_out_of_range_is_clipped(self):
+        mosaic = ring.GlobalMosaic(resolution_m=200000.0)
+        n_lat = len(mosaic.lat_centers)
+        idx = mosaic._bin_index(np.array([-999.0, 999.0]), mosaic.lat_bins[0], n_lat)
+        assert idx.tolist() == [0, n_lat - 1]
+
+
+# ── Degraded-quality notes ────────────────────────────────────────────
+
+class TestQualityAttrs:
+    """Zero-filled channels still produce winds, so the shortfall is recorded."""
+
+    FLOW = ["C08", "C09", "C10", "C12", "C14"]
+    RAD = ["C07", "C08", "C09", "C10", "C11", "C12", "C13", "C14", "C15", "C16"]
+
+    def test_nothing_missing_is_not_degraded(self):
+        attrs = ring.quality_attrs(self.FLOW, self.RAD, {"flow": [], "rad": []})
+        assert attrs["quality_degraded"] == 0
+        assert attrs["n_bands_missing"] == 0
+        assert "all requested bands available" in attrs["quality_note"]
+
+    def test_a_couple_missing_is_recorded_but_not_degraded(self):
+        """SEVIRI always lacks C04/C06 and FCI C09/C14 — that is normal."""
+        attrs = ring.quality_attrs(self.FLOW, self.RAD,
+                                   {"flow": ["C09"], "rad": ["C09"]})
+        assert attrs["quality_degraded"] == 0
+        assert attrs["bands_missing"] == "C09"
+        assert "DEGRADED" not in attrs["quality_note"]
+
+    def test_losing_most_bands_is_degraded(self):
+        """MTG on mtg_highres_1000m has only ir_105 and ir_38."""
+        gone = {"flow": ["C08", "C09", "C10", "C12"],
+                "rad": ["C08", "C09", "C10", "C11", "C12", "C15", "C16"]}
+        attrs = ring.quality_attrs(self.FLOW, self.RAD, gone)
+        assert attrs["quality_degraded"] == 1
+        assert attrs["quality_note"].startswith("DEGRADED QUALITY")
+        assert "lower confidence" in attrs["quality_note"]
+
+    def test_the_threshold_is_a_fraction_of_what_was_asked_for(self):
+        few = ["C08", "C14"]
+        attrs = ring.quality_attrs(few, [], {"flow": ["C08"], "rad": []})
+        assert attrs["quality_degraded"] == 1      # one of two is 50%
+
+    def test_flow_band_losses_are_called_out_separately(self):
+        attrs = ring.quality_attrs(self.FLOW, self.RAD,
+                                   {"flow": ["C08"], "rad": ["C13"]})
+        assert attrs["flow_bands_missing"] == "C08"
+        assert set(attrs["bands_missing"].split(",")) == {"C08", "C13"}
+
+    def test_a_band_in_both_lists_counts_once_toward_the_threshold(self):
+        """FCI lacks C09 and C14 — 2 of 10 distinct bands, not 4 of 15."""
+        attrs = ring.quality_attrs(
+            self.FLOW, self.RAD,
+            {"flow": ["C09", "C14"], "rad": ["C09", "C14"]})
+        assert attrs["n_bands_requested"] == 10
+        assert attrs["n_bands_missing"] == 2
+        assert attrs["quality_degraded"] == 0
+
+    def test_counts_are_deduplicated_across_flow_and_rad(self):
+        attrs = ring.quality_attrs(self.FLOW, self.RAD,
+                                   {"flow": ["C09"], "rad": ["C09"]})
+        assert attrs["n_bands_missing"] == 1
+
+
+class TestMosaicQuality:
+    def _sat(self, sat_id, zenith=10.0, n=6, **quality):
+        lat, lon = np.meshgrid(np.linspace(-10, 10, n), np.linspace(-10, 10, n),
+                               indexing="ij")
+        data = {v: np.full((n, n), 1.0, np.float32) for v in ring.OUTPUT_VARS}
+        data["quality_flag"] = np.full((n, n), 2.0, np.float32)
+        return xr.Dataset(
+            {v: (("y", "x"), data[v]) for v in ring.OUTPUT_VARS},
+            coords={"latitude": (("y", "x"), lat.astype(np.float32)),
+                    "longitude": (("y", "x"), lon.astype(np.float32)),
+                    "zenith_angle": (("y", "x"),
+                                     np.full((n, n), zenith, np.float32))},
+            attrs={"satellite_id": sat_id, "time": "2026-08-01T00:00:00",
+                   **quality})
+
+    def test_clean_mosaic_says_so(self):
+        mosaic = ring.GlobalMosaic(resolution_m=200_000.0)
+        mosaic.add("goes19", self._sat("goes19"))
+        attrs = mosaic.to_dataset().attrs
+        assert attrs["quality_degraded"] == 0
+        assert "all contributing satellites" in attrs["quality_note"]
+
+    def test_a_degraded_contributor_is_named(self):
+        mosaic = ring.GlobalMosaic(resolution_m=200_000.0)
+        mosaic.add("mtg-i1", self._sat(
+            "mtg-i1", bands_missing="C08,C09,C10", n_bands_missing=3,
+            n_bands_requested=15, quality_degraded=1))
+        attrs = mosaic.to_dataset().attrs
+        assert attrs["quality_degraded"] == 1
+        assert attrs["degraded_satellites"] == "mtg-i1"
+        assert "mtg-i1" in attrs["quality_note"]
+        assert "source_satellite_index" in attrs["quality_note"]
+
+    def test_missing_but_not_degraded_is_reported_without_alarm(self):
+        mosaic = ring.GlobalMosaic(resolution_m=200_000.0)
+        mosaic.add("msg-iodc", self._sat(
+            "msg-iodc", bands_missing="C04,C06", n_bands_missing=2,
+            n_bands_requested=15, quality_degraded=0))
+        attrs = mosaic.to_dataset().attrs
+        assert attrs["quality_degraded"] == 0
+        assert "msg-iodc: 2/15 bands missing" in attrs["quality_note"]
+
+    def test_a_satellite_that_won_no_cells_is_not_reported(self):
+        mosaic = ring.GlobalMosaic(resolution_m=200_000.0)
+        blank = self._sat("mtg-i1", n_bands_missing=9, n_bands_requested=15,
+                          quality_degraded=1, bands_missing="C08")
+        blank["quality_flag"][:] = 0.0          # contributes nothing
+        mosaic.add("mtg-i1", blank)
+        mosaic.add("goes19", self._sat("goes19"))
+        assert mosaic.to_dataset().attrs["quality_degraded"] == 0
+
+    def test_quality_survives_the_netcdf_round_trip(self, tmp_path):
+        mosaic = ring.GlobalMosaic(resolution_m=200_000.0)
+        mosaic.add("mtg-i1", self._sat(
+            "mtg-i1", bands_missing="C08,C09", n_bands_missing=2,
+            n_bands_requested=15, quality_degraded=1))
+        path = tmp_path / "m.nc"
+        mosaic.to_dataset().to_netcdf(path)
+        back = xr.open_dataset(path)
+        assert back.attrs["quality_degraded"] == 1
+        assert "DEGRADED" in back.attrs["quality_note"]

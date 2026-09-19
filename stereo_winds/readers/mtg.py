@@ -100,6 +100,9 @@ class MTG(GeoStoreReader):
     default_band = "ir_105"
 
     store_template = "geo/mtg_{resolution}.icechunk"
+    # Newer ingests land in separately named stores; consider
+    # them when the named one lacks the band or the coverage.
+    store_discovery_prefix = "mtg_"
     scan_interval_minutes = _FULL_DISK_MINUTES
 
     coord_names = {

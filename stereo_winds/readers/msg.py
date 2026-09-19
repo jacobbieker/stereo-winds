@@ -140,6 +140,8 @@ class MSG(GeoStoreReader):
     default_band = "IR_108"
 
     store_prefixes = _STORE_PREFIX
+    # Also consider the archive and high-resolution IODC stores.
+    store_discovery_prefix = "iodc_"
     scan_interval_minutes = SCAN_INTERVAL_MINUTES
 
     coord_names = {

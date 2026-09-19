@@ -6,6 +6,10 @@ Handles both x-sweep (ABI) and y-sweep (AHI) instruments.
 
 from __future__ import annotations
 
+import os
+import threading
+from collections import OrderedDict
+
 import numpy as np
 
 from .config import SatelliteConfig
@@ -207,7 +211,61 @@ def compute_zenith_angle(
     return zenith
 
 
-_pixel_scale_cache: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+# Full-disk grid geometry depends only on the projection, so it is
+# computed once per configuration rather than once per scene: at 5500^2
+# the zenith grid costs ~6 s and the lat/lon pair ~3 s, and a retrieval
+# asks for them for every satellite at every timestamp.
+#
+# Bounded, because each cached grid is ~240 MB.  The default holds the
+# whole geostationary ring; set STEREO_WINDS_GRID_CACHE_GB to change it,
+# or to 0 to recompute every time.
+_GRID_CACHE_BYTES = int(
+    float(os.environ.get("STEREO_WINDS_GRID_CACHE_GB", "8")) * 2**30)
+_grid_cache: OrderedDict[tuple, tuple[np.ndarray, ...]] = OrderedDict()
+_grid_cache_lock = threading.Lock()
+
+
+def _grid_key(sat: SatelliteConfig, kind: str) -> tuple:
+    """Everything about a config that changes its full-disk grids."""
+    return (
+        kind, sat.satellite_id, sat.n_rows, sat.n_cols,
+        sat.scale_x, sat.scale_y, sat.x_offset, sat.y_offset,
+        sat.sub_lon_deg, sat.satellite_height_m,
+        sat.semi_major_m, sat.semi_minor_m, sat.sweep,
+    )
+
+
+def _grid_cache_get(key: tuple):
+    with _grid_cache_lock:
+        value = _grid_cache.get(key)
+        if value is not None:
+            _grid_cache.move_to_end(key)
+        return value
+
+
+def _grid_cache_put(key: tuple, value: tuple[np.ndarray, ...]) -> None:
+    size = sum(a.nbytes for a in value)
+    if _GRID_CACHE_BYTES <= 0 or size > _GRID_CACHE_BYTES:
+        return
+    with _grid_cache_lock:
+        _grid_cache[key] = value
+        total = sum(sum(a.nbytes for a in v) for v in _grid_cache.values())
+        while total > _GRID_CACHE_BYTES and len(_grid_cache) > 1:
+            _, evicted = _grid_cache.popitem(last=False)
+            total -= sum(a.nbytes for a in evicted)
+
+
+def grid_cache_budget() -> int:
+    """Bytes the full-disk grid cache may hold."""
+    return _GRID_CACHE_BYTES
+
+
+def clear_grid_cache() -> None:
+    """Drop cached full-disk grids (tests, or to reclaim the memory)."""
+    with _grid_cache_lock:
+        _grid_cache.clear()
+
+
 
 
 def compute_pixel_scale(
@@ -235,10 +293,10 @@ def compute_pixel_scale(
     dy_m : (n_rows, n_cols) north-south ground distance per pixel (meters)
     NaN for off-Earth pixels.
     """
-    cache_key = (f"{sat.satellite_id}_{sat.n_rows}_{sat.n_cols}_{sat.scale_x}"
-                 f"_{sat.x_offset:.9f}_{sat.y_offset:.9f}")
-    if cache_key in _pixel_scale_cache:
-        return _pixel_scale_cache[cache_key]
+    cache_key = _grid_key(sat, "pixel_scale")
+    cached = _grid_cache_get(cache_key)
+    if cached is not None:
+        return cached
     cols = np.arange(sat.n_cols, dtype=np.float64)
     rows = np.arange(sat.n_rows, dtype=np.float64)
     col2d, row2d = np.meshgrid(cols, rows)
@@ -266,7 +324,7 @@ def compute_pixel_scale(
     xb, yb, zb = geodetic_to_ecef(lat_b, lon_b, 0.0, a, b)
     dy_m = np.sqrt((xb - xt)**2 + (yb - yt)**2 + (zb - zt)**2)
 
-    _pixel_scale_cache[cache_key] = (dx_m, dy_m)
+    _grid_cache_put(cache_key, (dx_m, dy_m))
     return dx_m, dy_m
 
 
@@ -277,11 +335,19 @@ def compute_grid_latlon(
 
     NaN for off-Earth pixels.  Useful for building geometry feature
     channels that let a single-satellite model generalize across the disk.
+
+    Cached per configuration; see ``_GRID_CACHE_BYTES``.
     """
+    cache_key = _grid_key(sat, "latlon")
+    cached = _grid_cache_get(cache_key)
+    if cached is not None:
+        return cached
     cols = np.arange(sat.n_cols, dtype=np.float64) * sat.scale_x + sat.x_offset
     rows = np.arange(sat.n_rows, dtype=np.float64) * sat.scale_y + sat.y_offset
     x2d, y2d = np.meshgrid(cols, rows)
-    return fixed_grid_to_geodetic(x2d, y2d, sat)
+    lat, lon = fixed_grid_to_geodetic(x2d, y2d, sat)
+    _grid_cache_put(cache_key, (lat, lon))
+    return lat, lon
 
 
 def compute_grid_zenith(
@@ -291,6 +357,14 @@ def compute_grid_zenith(
 
     NaN for off-Earth pixels.  This is purely geometric (time-independent)
     and satellite-relative, so the same routine works for any satellite.
+
+    Cached per configuration; see ``_GRID_CACHE_BYTES``.
     """
+    cache_key = _grid_key(sat, "zenith")
+    cached = _grid_cache_get(cache_key)
+    if cached is not None:
+        return cached[0]
     lat, lon = compute_grid_latlon(sat)
-    return compute_zenith_angle(lat, lon, sat)
+    zenith = compute_zenith_angle(lat, lon, sat)
+    _grid_cache_put(cache_key, (zenith,))
+    return zenith

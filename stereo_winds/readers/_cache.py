@@ -134,8 +134,20 @@ DEFAULT_DOWNLOAD_WORKERS = 8
 
 # Headroom left for everything that is not the scene cache: the model
 # inputs for one satellite (~3.7 GB at full disk), the mosaic
-# accumulator, the model itself and CUDA's host-side allocations.
-DEFAULT_MEMORY_RESERVE = 12 * 2**30
+# accumulator, the model itself, CUDA's host-side allocations and
+# allocator fragmentation.  Measured at ~14 GB for a six-satellite ring.
+DEFAULT_MEMORY_RESERVE = 16 * 2**30
+
+# Hard ceiling as a share of *total* RAM.  MemAvailable counts
+# reclaimable page cache, so sizing a cache to all of it drives the
+# process to fill RAM and leaves nothing for the page cache the reads
+# themselves need — which is how this ends in an OOM kill rather than an
+# eviction.
+MAX_CACHE_FRACTION = 0.35
+
+# If available memory ever falls below this, the cache gives memory back
+# rather than waiting to be killed.
+MEMORY_PRESSURE_FLOOR = 6 * 2**30
 
 
 def download_workers() -> int:
@@ -148,6 +160,21 @@ def download_workers() -> int:
             logger.warning("STEREO_WINDS_DOWNLOAD_WORKERS=%r is not an "
                            "integer — using %d", raw, DEFAULT_DOWNLOAD_WORKERS)
     return DEFAULT_DOWNLOAD_WORKERS
+
+
+def total_memory_bytes() -> int | None:
+    """Total physical RAM, or None if unknown."""
+    try:
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    try:  # pragma: no cover - non-Linux fallback
+        return os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    except (ValueError, OSError, AttributeError):
+        return None
 
 
 def available_memory_bytes() -> int | None:
@@ -187,6 +214,12 @@ def default_scene_cache_bytes(reserve: int = DEFAULT_MEMORY_RESERVE) -> int:
     available = available_memory_bytes()
     if available is None:
         return 4 * 2**30
+    limit = available - reserve
+    total = total_memory_bytes()
+    if total is not None:
+        # Never take more than a share of the box, however much happens to
+        # look free at the moment we are asked.
+        limit = min(limit, int(total * MAX_CACHE_FRACTION))
     # Floor at 1 GB: below that the cache cannot even hold one satellite's
     # triplet and prefetching would thrash.
-    return max(2**30, available - reserve)
+    return max(2**30, limit)

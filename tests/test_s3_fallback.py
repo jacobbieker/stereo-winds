@@ -241,48 +241,13 @@ class TestSceneToRad:
 
 # ── satpy scratch-file cleanup ────────────────────────────────────────
 
-class _FakeConfig:
-    """Stand-in for satpy.config: a get/set pair with a context manager."""
-
-    def __init__(self):
-        self._values = {"tmp_dir": tempfile.gettempdir()}
-
-    def get(self, key, default=None):
-        return self._values.get(key, default)
-
-    def set(self, **kwargs):
-        config = self
-
-        class _Ctx:
-            def __enter__(self_inner):
-                self_inner.old = dict(config._values)
-                config._values.update(kwargs)
-                return config
-
-            def __exit__(self_inner, *exc):
-                config._values = self_inner.old
-                return False
-
-        return _Ctx()
-
-
 def _install_fake_satpy(monkeypatch, record):
-    """Inject a satpy whose Scene writes a file into the configured tmp_dir.
-
-    That is what ``ahi_hsd`` does for every bz2 segment, and what used to
-    pile up in /tmp.
-    """
-    config = _FakeConfig()
+    """Inject a satpy whose Scene records the filenames it is handed."""
 
     class FakeScene:
         def __init__(self, reader, filenames):
             record["reader"] = reader
-            # Simulate decompression into satpy's configured scratch area.
-            tmp_dir = Path(config.get("tmp_dir"))
-            for i, _ in enumerate(filenames):
-                path = tmp_dir / f"segment-{i}.DAT"
-                path.write_bytes(b"x" * 16)
-                record.setdefault("written", []).append(path)
+            record["filenames"] = list(filenames)
 
         def load(self, bands):
             record["loaded"] = list(bands)
@@ -301,41 +266,78 @@ def _install_fake_satpy(monkeypatch, record):
             return Lazy(data)
 
     satpy = types.ModuleType("satpy")
-    satpy.config = config
     satpy.Scene = FakeScene
     monkeypatch.setitem(sys.modules, "satpy", satpy)
     return record
 
 
+def _bz2_file(path: Path, payload: bytes = b"hello") -> Path:
+    import bz2
+
+    path.write_bytes(bz2.compress(payload))
+    return path
+
+
 class TestScratchCleanup:
-    def test_scratch_goes_to_the_given_directory_not_tmp(self, tmp_path, monkeypatch):
+    def test_bz2_is_expanded_into_the_given_directory_not_tmp(
+            self, tmp_path, monkeypatch):
         record = _install_fake_satpy(monkeypatch, {})
         scratch = tmp_path / "cache"
-        load_scene_array("ahi_hsd", [Path("a.bz2"), Path("b.bz2")], "B14",
-                         scratch_dir=scratch)
-        written = record["written"]
-        assert written, "fake satpy wrote nothing"
-        for path in written:
+        src = _bz2_file(tmp_path / "HS_H09_seg_S0110.DAT.bz2", b"payload")
+        load_scene_array("ahi_hsd", [src], "B14", scratch_dir=scratch)
+
+        handed = [Path(f) for f in record["filenames"]]
+        assert all(p.suffix != ".bz2" for p in handed), "satpy saw a .bz2 path"
+        for path in handed:
             assert scratch in path.parents, f"{path} escaped the scratch dir"
 
     def test_scratch_directory_is_removed(self, tmp_path, monkeypatch):
         """Regression: satpy only unlinks these when handlers are collected."""
         record = _install_fake_satpy(monkeypatch, {})
         scratch = tmp_path / "cache"
-        load_scene_array("ahi_hsd", [Path("a.bz2")], "B14", scratch_dir=scratch)
+        src = _bz2_file(tmp_path / "HS_H09_seg_S0110.DAT.bz2")
+        load_scene_array("ahi_hsd", [src], "B14", scratch_dir=scratch)
         assert not list(scratch.glob("satpy-scratch-*"))
-        assert not any(p.exists() for p in record["written"])
+        assert src.exists(), "the cached download must survive"
+
+    def test_uncompressed_inputs_are_passed_straight_through(
+            self, tmp_path, monkeypatch):
+        record = _install_fake_satpy(monkeypatch, {})
+        src = tmp_path / "gk2a_ami_le1b_ir112_fd020ge_202608010400.nc"
+        src.write_bytes(b"nc")
+        load_scene_array("ami_l1b", [src], "IR112",
+                         scratch_dir=tmp_path / "cache")
+        assert record["filenames"] == [str(src)]
+
+    def test_decompressed_content_is_correct(self, tmp_path, monkeypatch):
+        record = _install_fake_satpy(monkeypatch, {})
+        seen = {}
+
+        payload = b"x" * 5000
+        src = _bz2_file(tmp_path / "HS_H09_seg_S0110.DAT.bz2", payload)
+
+        real = _install_fake_satpy
+
+        class Checking(sys.modules["satpy"].Scene):
+            def __init__(self, reader, filenames):
+                seen["content"] = Path(filenames[0]).read_bytes()
+                super().__init__(reader, filenames)
+
+        sys.modules["satpy"].Scene = Checking
+        load_scene_array("ahi_hsd", [src], "B14", scratch_dir=tmp_path / "c")
+        assert seen["content"] == payload
 
     def test_data_is_computed_before_cleanup(self, tmp_path, monkeypatch):
         """A lazy array would reference files we are about to delete."""
         record = _install_fake_satpy(monkeypatch, {})
-        out = load_scene_array("ahi_hsd", [Path("a.bz2")], "B14",
+        src = _bz2_file(tmp_path / "HS_H09_seg_S0110.DAT.bz2")
+        out = load_scene_array("ahi_hsd", [src], "B14",
                                scratch_dir=tmp_path / "cache")
         assert record.get("computed") is True
         assert isinstance(out.values, np.ndarray)
 
     def test_cleanup_happens_even_on_failure(self, tmp_path, monkeypatch):
-        record = _install_fake_satpy(monkeypatch, {})
+        _install_fake_satpy(monkeypatch, {})
         satpy = sys.modules["satpy"]
 
         class Boom(satpy.Scene):
@@ -344,21 +346,43 @@ class TestScratchCleanup:
 
         satpy.Scene = Boom
         scratch = tmp_path / "cache"
+        src = _bz2_file(tmp_path / "HS_H09_seg_S0110.DAT.bz2")
         with pytest.raises(RuntimeError, match="decode failed"):
-            load_scene_array("ahi_hsd", [Path("a.bz2")], "B14",
-                             scratch_dir=scratch)
+            load_scene_array("ahi_hsd", [src], "B14", scratch_dir=scratch)
         assert not list(scratch.glob("satpy-scratch-*"))
 
-    def test_each_load_uses_a_fresh_directory(self, tmp_path, monkeypatch):
-        """Concurrent or repeated loads must not share a scratch path."""
-        record = _install_fake_satpy(monkeypatch, {})
-        seen = set()
-        for _ in range(3):
-            record["written"] = []
-            load_scene_array("ahi_hsd", [Path("a.bz2")], "B14",
-                             scratch_dir=tmp_path / "cache")
-            seen.add(record["written"][0].parent)
-        assert len(seen) == 3
+    def test_concurrent_loads_do_not_share_scratch(self, tmp_path, monkeypatch):
+        """Parallel prefetch broke when satpy's global tmp_dir was used."""
+        import threading
+
+        _install_fake_satpy(monkeypatch, {})
+        satpy = sys.modules["satpy"]
+        dirs: list[Path] = []
+        lock = threading.Lock()
+
+        class Recording(satpy.Scene):
+            def __init__(self, reader, filenames):
+                with lock:
+                    dirs.append(Path(filenames[0]).parent)
+                # Hold the scratch open so overlapping loads really overlap.
+                threading.Event().wait(0.05)
+                assert Path(filenames[0]).exists(), "another load deleted it"
+                super().__init__(reader, filenames)
+
+        satpy.Scene = Recording
+        scratch = tmp_path / "cache"
+        sources = [_bz2_file(tmp_path / f"HS_H09_seg_S{i:02d}10.DAT.bz2")
+                   for i in range(6)]
+
+        threads = [threading.Thread(
+            target=load_scene_array,
+            args=("ahi_hsd", [src], "B14"),
+            kwargs={"scratch_dir": scratch}) for src in sources]
+        [t.start() for t in threads]
+        [t.join() for t in threads]
+
+        assert len(set(dirs)) == len(sources), "scratch directories collided"
+        assert not list(scratch.glob("satpy-scratch-*"))
 
 
 # ── Warning hygiene ───────────────────────────────────────────────────

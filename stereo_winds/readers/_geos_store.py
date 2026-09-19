@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +52,22 @@ from stereo_winds.readers._cache import (
 from stereo_winds.readers._satpy_s3 import SceneNotInStore, s3_filesystem
 
 logger = logging.getLogger(__name__)
+
+# Opened stores, keyed by (bucket, endpoint, prefix).  Shared across
+# readers and threads: a store is immutable for the life of a run.
+_OPEN_DATASETS: dict[tuple[str, str, str], xr.Dataset] = {}
+# prefix -> (bands, first scan, last scan); None when the store is unusable.
+_STORE_CONTENTS: dict[str, tuple | None] = {}
+_BUCKET_LISTINGS: dict[tuple[str, str, str], list[str]] = {}
+_OPEN_LOCK = threading.Lock()
+
+
+def clear_store_cache() -> None:
+    """Drop cached store handles (tests, or to pick up a newer snapshot)."""
+    with _OPEN_LOCK:
+        _OPEN_DATASETS.clear()
+        _STORE_CONTENTS.clear()
+        _BUCKET_LISTINGS.clear()
 
 # GRS80, the default when a store states no ellipsoid of its own.
 _GRS80_SEMI_MAJOR = 6378137.0
@@ -80,6 +97,11 @@ class GeoStoreReader:
 
     store_template: str | None = None
     store_prefixes: dict[str, str] | None = None
+    store_root: str = "geo"
+    # Stores whose names start with this belong to this instrument, and
+    # are considered when the named one lacks the band or the coverage.
+    # Empty disables discovery and keeps the named store only.
+    store_discovery_prefix: str = ""
 
     scan_interval_minutes: int = 10
 
@@ -185,6 +207,7 @@ class GeoStoreReader:
         return icechunk.Repository.open(storage).readonly_session("main").store
 
     def _store_prefix(self, resolution: str) -> str:
+        """The store this reader would open from the name alone."""
         if self.store_prefixes is not None:
             return self.store_prefixes[self.satellite]
         if self.store_template is None:
@@ -192,16 +215,131 @@ class GeoStoreReader:
                 f"{type(self).__name__} declares no store location")
         return self.store_template.format(resolution=resolution)
 
+    # ------------------------------------------------------------------
+    # Choosing a store by what it holds, not by what it is called
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _bucket_stores(cls) -> list[str]:
+        """Every store in the bucket, listed once per process."""
+        key = (cls.bucket, cls.endpoint, cls.store_root)
+        with _OPEN_LOCK:
+            cached = _BUCKET_LISTINGS.get(key)
+        if cached is not None:
+            return cached
+        try:
+            import s3fs
+
+            fs = s3fs.S3FileSystem(anon=True, endpoint_url=cls.endpoint)
+            names = sorted(k.split("/")[-1]
+                           for k in fs.ls(f"{cls.bucket}/{cls.store_root}"))
+        except Exception:
+            logger.exception("Could not list %s/%s; falling back to the "
+                             "store names built from the band table",
+                             cls.bucket, cls.store_root)
+            names = []
+        with _OPEN_LOCK:
+            _BUCKET_LISTINGS[key] = names
+        return names
+
+    def _candidate_stores(self, band: str) -> list[str]:
+        """Stores that might hold ``band``, most likely first.
+
+        The band's resolution tier is a hint, not the answer: bands move
+        between tiers and newer ingests land in separately named stores,
+        so the named store is tried first and the instrument's other
+        stores after it.
+        """
+        preferred = self._store_prefix(self.band_resolution[band])
+        if not self.store_discovery_prefix:
+            return [preferred]
+
+        tier = self.band_resolution[band]
+        others = [f"{self.store_root}/{name}"
+                  for name in self._bucket_stores()
+                  if name.startswith(self.store_discovery_prefix)]
+        # Same tier first (a newer ingest of the same grid), then the rest.
+        same_tier = [p for p in others if tier in p and p != preferred]
+        rest = [p for p in others if tier not in p and p != preferred]
+        return [preferred, *same_tier, *rest]
+
+    def _store_contents(self, prefix: str):
+        """(bands, first scan, last scan) for a store, or None if unusable."""
+        with _OPEN_LOCK:
+            cached = _STORE_CONTENTS.get(prefix)
+        if cached is not None:
+            return cached
+        try:
+            ds = self._open_dataset_at(prefix)
+            times = np.asarray(ds["time"].values, "datetime64[ns]")
+            contents = (frozenset(ds.data_vars), times.min(), times.max())
+        except Exception:
+            logger.info("Store %s is unusable; skipping it", prefix)
+            contents = None
+        with _OPEN_LOCK:
+            _STORE_CONTENTS[prefix] = contents
+        return contents
+
+    def _select_store(self, band: str, t: dt.datetime) -> str:
+        """The store holding ``band`` with coverage at ``t``.
+
+        Raises ``SceneNotInStore`` when no store has both, which lets the
+        caller fall back to public S3 where one exists.
+        """
+        target = np.datetime64(t.replace(tzinfo=None), "ns")
+        tolerance = np.timedelta64(
+            int(self.store_tolerance.total_seconds()), "s")
+        tried: list[str] = []
+        for prefix in self._candidate_stores(band):
+            contents = self._store_contents(prefix)
+            if contents is None:
+                continue
+            bands, first, last = contents
+            if band not in bands:
+                logger.debug("%s does not carry %s", prefix, band)
+                continue
+            tried.append(prefix)
+            if first - tolerance <= target <= last + tolerance:
+                return prefix
+        raise SceneNotInStore(
+            f"no store carries {self.satellite} {band} at {t} "
+            f"(checked: {', '.join(tried) or 'none with this band'})"
+        )
+
     def _open_dataset(self, resolution: str) -> xr.Dataset:
-        """Open the icechunk store for the given resolution as xr.Dataset."""
-        prefix = self._store_prefix(resolution)
-        logger.info("Opening icechunk store %s/%s", self.bucket, prefix)
-        ds = xr.open_zarr(self._open_store(prefix))
-        if "time" in ds.dims:
-            # Drop duplicate timestamps, then sort for nearest-neighbour lookup.
-            _, unique_idx = np.unique(ds["time"].values, return_index=True)
-            ds = ds.isel(time=np.sort(unique_idx)).sortby("time")
-        return ds
+        """Open the icechunk store for the given resolution as xr.Dataset.
+
+        Cached per store for the life of the process.  Opening costs a
+        round trip to the object store plus a dedupe-and-sort over the
+        whole time coordinate — tens of thousands of entries — and a
+        single timestamp asks for ~20 scenes from the same store, so
+        doing it per band made the reads dominate the retrieval.
+
+        The session is a read-only snapshot, so every scene in a run
+        also sees a consistent view of the store.
+        """
+        return self._open_dataset_at(self._store_prefix(resolution))
+
+    def _open_dataset_at(self, prefix: str) -> xr.Dataset:
+        """Open a specific store, cached for the life of the process."""
+        key = (self.bucket, self.endpoint, prefix)
+        cached = _OPEN_DATASETS.get(key)
+        if cached is not None:
+            return cached
+        with _OPEN_LOCK:
+            # Re-check: another thread may have opened it while we waited.
+            cached = _OPEN_DATASETS.get(key)
+            if cached is not None:
+                return cached
+            logger.info("Opening icechunk store %s/%s", self.bucket, prefix)
+            ds = xr.open_zarr(self._open_store(prefix))
+            if "time" in ds.dims:
+                # Drop duplicate timestamps, then sort for nearest-neighbour
+                # lookup.
+                _, unique_idx = np.unique(ds["time"].values, return_index=True)
+                ds = ds.isel(time=np.sort(unique_idx)).sortby("time")
+            _OPEN_DATASETS[key] = ds
+            return ds
 
     def _select_time(
         self, ds: xr.Dataset, t: dt.datetime,
@@ -273,8 +411,9 @@ class GeoStoreReader:
         prune_cache(self.cache_dir / self.satellite, t - self.cache_retention)
 
     def _icechunk_data_at_time(self, t: dt.datetime, band: str) -> xr.Dataset:
-        """Read the scene from the source.coop icechunk store."""
-        ds = self._open_dataset(self.band_resolution[band])
+        """Read the scene from whichever icechunk store covers it."""
+        prefix = self._select_store(band, t)
+        ds = self._open_dataset_at(prefix)
         snap = self._select_time(ds, t)
         rad_2d = self._extract_radiance(snap, band)
 

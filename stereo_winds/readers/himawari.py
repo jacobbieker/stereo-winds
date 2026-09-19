@@ -110,6 +110,9 @@ class Himawari(GeoStoreReader):
     default_band = "B14"
 
     store_template = "geo/himawari_{resolution}.icechunk"
+    # Newer ingests land in separately named stores; consider
+    # them when the named one lacks the band or the coverage.
+    store_discovery_prefix = "himawari_"
     scan_interval_minutes = _FULL_DISK_MINUTES
 
     coord_names = {

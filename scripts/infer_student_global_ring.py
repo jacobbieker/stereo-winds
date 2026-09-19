@@ -102,9 +102,17 @@ BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
 from stereo_winds.config import SATELLITE_CONFIGS, SatelliteConfig
+from stereo_winds.readers._satpy_s3 import SceneNotInStore
+from stereo_winds.icechunk_output import (
+    icechunk_existing_times,
+    icechunk_storage,
+    open_icechunk_repo,
+    write_mosaic_to_icechunk,
+)
 from stereo_winds.readers._cache import (
     DEFAULT_DOWNLOAD_WORKERS,
     DEFAULT_MEMORY_RESERVE,
+    MEMORY_PRESSURE_FLOOR,
     available_memory_bytes,
     default_scene_cache_bytes,
 )
@@ -113,6 +121,7 @@ from stereo_winds.navigation import (
     compute_grid_latlon,
     compute_grid_zenith,
     compute_pixel_scale,
+    grid_cache_budget,
 )
 from stereo_winds.student_dataset import (
     DEFAULT_FLOW_BANDS,
@@ -129,6 +138,11 @@ DT_MINUTES = 10
 # Sub-satellite longitude agreement tolerance (deg).  Station-keeping
 # boxes are typically +/-0.1 deg, so anything larger is worth flagging.
 SUB_LON_TOL_DEG = 0.05
+# A retrieval is flagged degraded once this share of the requested bands
+# had to be zero-filled.  Some absences are normal — SEVIRI has no 1.4 or
+# 2.2 µm channel, FCI none at 6.9 or 11.2 µm — so a handful of missing
+# bands is expected; losing a quarter of them is not.
+DEGRADED_BAND_FRACTION = 0.25
 OUTPUT_VARS = [
     "u_wind", "v_wind", "cloud_top_height",
     "quality_flag", "sigma_u", "sigma_v", "sigma_h",
@@ -326,13 +340,23 @@ class SceneCache:
     reference, so a scene a caller still holds stays alive.
     """
 
+    # How often to re-check free memory, in inserts.  Each check is one
+    # small read of /proc/meminfo.
+    _PRESSURE_CHECK_EVERY = 16
+
+    # Never shrink below this: a retrieval needs its scenes in flight.
+    _SHRINK_FLOOR = 2**30
+
     def __init__(self, max_bytes: int) -> None:
         self.max_bytes = max(0, int(max_bytes))
+        self.limit = self.max_bytes
         self._entries: OrderedDict[SceneKey, tuple] = OrderedDict()
         self._bytes = 0
         self._lock = threading.Lock()
+        self._since_check = 0
         self.hits = 0
         self.misses = 0
+        self.shrinks = 0
 
     def get(self, key: SceneKey):
         with self._lock:
@@ -349,15 +373,48 @@ class SceneCache:
         size = int(getattr(data, "nbytes", 0))
         if self.max_bytes == 0 or size > self.max_bytes:
             return
+        self._check_pressure()
         with self._lock:
             if key in self._entries:
                 self._bytes -= int(getattr(self._entries[key][0], "nbytes", 0))
                 del self._entries[key]
             self._entries[key] = value
             self._bytes += size
-            while self._bytes > self.max_bytes and self._entries:
+            while self._bytes > self.limit and self._entries:
                 _, evicted = self._entries.popitem(last=False)
                 self._bytes -= int(getattr(evicted[0], "nbytes", 0))
+
+    def _check_pressure(self) -> None:
+        """Lower the working limit when the box is running out of memory.
+
+        The limit is chosen once from what was free at startup, which can
+        be wrong later: other work starts, or the pipeline's own
+        allocations grow.  Holding scenes until the kernel intervenes
+        loses the whole run, so the cache gives memory back instead.
+        """
+        with self._lock:
+            self._since_check += 1
+            if self._since_check < self._PRESSURE_CHECK_EVERY:
+                return
+            self._since_check = 0
+        available = available_memory_bytes()
+        if available is None:
+            return
+        if available < MEMORY_PRESSURE_FLOOR:
+            with self._lock:
+                # Halve, but keep enough for a retrieval's scenes in
+                # flight — or the whole budget, if it was already small.
+                floor = min(self._SHRINK_FLOOR, self.max_bytes)
+                new_limit = max(floor, self.limit // 2)
+                if new_limit < self.limit:
+                    self.limit = new_limit
+                    self.shrinks += 1
+                    logger.warning(
+                        "Only %.1f GB free — shrinking the scene cache to "
+                        "%.1f GB", available / 2**30, self.limit / 2**30)
+        elif self.limit < self.max_bytes and available > 3 * MEMORY_PRESSURE_FLOOR:
+            with self._lock:
+                self.limit = min(self.max_bytes, self.limit * 2)
 
     @property
     def nbytes(self) -> int:
@@ -367,9 +424,33 @@ class SceneCache:
     def summary(self) -> str:
         total = self.hits + self.misses
         rate = 100.0 * self.hits / total if total else 0.0
+        shrunk = "" if self.limit == self.max_bytes else (
+            f", limit lowered to {self.limit / 2**30:.1f} GB "
+            f"({self.shrinks}x under pressure)")
         return (f"scene cache {self.nbytes / 2**30:.1f}/"
                 f"{self.max_bytes / 2**30:.1f} GB, "
-                f"{self.hits}/{total} hits ({rate:.0f}%)")
+                f"{self.hits}/{total} hits ({rate:.0f}%){shrunk}")
+
+    def reset_stats(self) -> None:
+        self.hits = 0
+        self.misses = 0
+
+
+# Cache size when consecutive timestamps cannot share a scene.  Enough to
+# smooth a repeat within one retrieval, small enough to be irrelevant.
+NO_REUSE_CACHE_BYTES = 2**30
+
+
+def scene_cache_is_useful(step_minutes: int, sats: list[str]) -> bool:
+    """Can consecutive timestamps share a scene?
+
+    A timestamp reads ``{t-dt, t, t+dt}`` and the next reads that window
+    shifted by the step, so they overlap only when the step is at most
+    twice the scan interval.  At coarser steps every cached scene is one
+    that will never be read again, and holding them fills memory for no
+    benefit.
+    """
+    return any(step_minutes <= 2 * scan_interval(sat) for sat in sats)
 
 
 class ScenePrefetcher:
@@ -381,12 +462,18 @@ class ScenePrefetcher:
     asking for a scene that is still in flight simply waits for it.
     """
 
+    # Backstop on queued-but-uncollected work.  One satellite of
+    # lookahead is ~20 scenes; beyond a few of those something has gone
+    # wrong and the oldest are dropped rather than held forever.
+    _MAX_INFLIGHT = 64
+
     def __init__(self, cache: SceneCache, max_workers: int = 4) -> None:
         self.cache = cache
         self._pool = ThreadPoolExecutor(
             max_workers=max(1, max_workers), thread_name_prefix="scene")
-        self._inflight: dict[SceneKey, Future] = {}
+        self._inflight: OrderedDict[SceneKey, Future] = OrderedDict()
         self._lock = threading.Lock()
+        self.dropped = 0
 
     def _load(self, key: SceneKey) -> tuple:
         sat_id, band, t = key
@@ -403,6 +490,35 @@ class ScenePrefetcher:
                 if self.cache.get(key) is not None:
                     continue
                 self._inflight[key] = self._pool.submit(self._load, key)
+                while len(self._inflight) > self._MAX_INFLIGHT:
+                    _, stale = self._inflight.popitem(last=False)
+                    stale.cancel()
+                    self.dropped += 1
+
+    def reset(self) -> int:
+        """Drop everything queued but never collected; returns how many.
+
+        A satellite can be skipped because its output already exists, or
+        fail after its scenes were queued.  Those futures hold a decoded
+        full disk each — ~120 MB — and nothing will ever read them, so
+        holding them for the rest of the run is a leak.  Anything worth
+        keeping is in the cache already.
+        """
+        with self._lock:
+            futures = list(self._inflight.values())
+            self._inflight.clear()
+        for future in futures:
+            future.cancel()
+        self.dropped += len(futures)
+        if futures:
+            logger.debug("Dropped %d prefetched scene(s) nothing asked for",
+                         len(futures))
+        return len(futures)
+
+    @property
+    def inflight(self) -> int:
+        with self._lock:
+            return len(self._inflight)
 
     def get(self, sat_id: str, band: str, t: datetime) -> tuple:
         """Return a scene, waiting on a prefetch or loading it inline."""
@@ -423,6 +539,20 @@ class ScenePrefetcher:
         for future in futures:
             future.cancel()
         self._pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _needs_inference(
+    sat_id: str, t0: datetime, out_dir: Path,
+    skip_existing: bool, write_netcdf: bool,
+) -> bool:
+    """False when this satellite's output already exists and will be reused.
+
+    Prefetching for a satellite that is about to be skipped queues work
+    nobody collects.
+    """
+    if not (skip_existing and write_netcdf):
+        return True
+    return not sat_nc_path(out_dir, sat_id, t0).exists()
 
 
 def scene_requests(
@@ -501,13 +631,31 @@ def _icechunk_source(sat_id: str, band: str):
 def _icechunk_available_times(
     sat_id: str, band: str, start: datetime, end: datetime,
 ) -> np.ndarray:
-    """Scan times in the store between ``start`` and ``end`` (inclusive)."""
-    src, resolution = _icechunk_source(sat_id, band)
-    ds = src._open_dataset(resolution)
-    times = np.asarray(ds["time"].values, dtype="datetime64[ns]")
+    """Scan times between ``start`` and ``end``, across every store.
+
+    The loader picks whichever store carries the band and covers the
+    time, so availability has to consider the same set — otherwise the
+    filter rejects timestamps the pipeline could actually retrieve.
+    """
+    src, _ = _icechunk_source(sat_id, band)
+    resolved = src.bands[0]
     lo = np.datetime64(start, "ns")
     hi = np.datetime64(end, "ns")
-    return np.unique(times[(times >= lo) & (times <= hi)])
+
+    found: list[np.ndarray] = []
+    for prefix in src._candidate_stores(resolved):
+        contents = src._store_contents(prefix)
+        if contents is None or resolved not in contents[0]:
+            continue
+        bands, first, last = contents
+        if last < lo or first > hi:
+            continue
+        ds = src._open_dataset_at(prefix)
+        times = np.asarray(ds["time"].values, dtype="datetime64[ns]")
+        found.append(times[(times >= lo) & (times <= hi)])
+    if not found:
+        return np.array([], dtype="datetime64[ns]")
+    return np.unique(np.concatenate(found))
 
 
 _ABI_START_RE = re.compile(r"_s(\d{13})")
@@ -746,7 +894,8 @@ def _build_input_stack(
     rad_bands: list[str],
     rad_time_frames: int = 1,
     prefetcher: ScenePrefetcher | None = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, SatelliteConfig]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, SatelliteConfig,
+           dict[str, list[str]]]:
     """Build the (C, H, W) flow/rad/geom input stack from icechunk data.
 
     Bands that have no spectral equivalent on the target satellite are
@@ -762,7 +911,10 @@ def _build_input_stack(
     and then running ``nan_to_num`` over it would hold three copies of
     the same 2.3 GB at once.
 
-    Returns (flow_arr, rad_arr, geom_arr, finite_mask, scene_config).
+    Returns (flow_arr, rad_arr, geom_arr, finite_mask, scene_config,
+    missing), where ``missing`` names the bands that had to be
+    zero-filled — the instrument has no equivalent channel, or no store
+    covers that band at this time.
     """
     n_flow_ch = 4 * len(flow_bands)
     n_rad_frames = 3 if rad_time_frames == 3 else 1
@@ -776,6 +928,7 @@ def _build_input_stack(
     # loaded scene has established the grid shape.
     missing_flow: list[int] = []
     missing_rad: list[int] = []
+    missing: dict[str, list[str]] = {"flow": [], "rad": []}
     # Frames the radiance pass will need again, kept only for those bands.
     rad_needed = {b for b in rad_bands if _band_available(sat_id, b)}
     cached: dict[str, tuple] = {}
@@ -794,9 +947,18 @@ def _build_input_stack(
         if not _band_available(sat_id, band):
             logger.warning("  Band %s unavailable on %s — filling with zeros", band, sat_id)
             missing_flow.extend(range(base, base + 4))
+            missing["flow"].append(band)
             continue
-        a_m, a_0, a_p, cfg, dt_used = _load_three_frames(
-            sat_id, band, t0, prefetcher=prefetcher)
+        try:
+            a_m, a_0, a_p, cfg, dt_used = _load_three_frames(
+                sat_id, band, t0, prefetcher=prefetcher)
+        except SceneNotInStore as exc:
+            # No store covers this band at this time and there is no S3
+            # fallback: zero-fill it rather than losing the satellite.
+            logger.warning("  %s %s: %s — filling with zeros", sat_id, band, exc)
+            missing_flow.extend(range(base, base + 4))
+            missing["flow"].append(band)
+            continue
         if scene_cfg is None:
             scene_cfg = cfg
         else:
@@ -842,21 +1004,29 @@ def _build_input_stack(
         if not _band_available(sat_id, band):
             logger.warning("  Band %s unavailable on %s — filling with zeros", band, sat_id)
             missing_rad.extend(range(base, base + n_rad_frames))
+            missing["rad"].append(band)
             continue
 
         if band in cached:
             a_m, a_0, a_p, vb = cached.pop(band)
         else:
-            if rad_time_frames == 3:
-                a_m, a_0, a_p, cfg, _ = _load_three_frames(
-                    sat_id, band, t0, prefetcher=prefetcher)
-                vb = np.isfinite(a_m) & np.isfinite(a_0) & np.isfinite(a_p)
-            else:
-                a_0, cfg = (prefetcher.get(sat_id, band, t0)
-                            if prefetcher is not None
-                            else _load_scene(sat_id, band, t0))
-                vb = np.isfinite(a_0)
-                a_m = a_p = None
+            try:
+                if rad_time_frames == 3:
+                    a_m, a_0, a_p, cfg, _ = _load_three_frames(
+                        sat_id, band, t0, prefetcher=prefetcher)
+                    vb = np.isfinite(a_m) & np.isfinite(a_0) & np.isfinite(a_p)
+                else:
+                    a_0, cfg = (prefetcher.get(sat_id, band, t0)
+                                if prefetcher is not None
+                                else _load_scene(sat_id, band, t0))
+                    vb = np.isfinite(a_0)
+                    a_m = a_p = None
+            except SceneNotInStore as exc:
+                logger.warning("  %s %s: %s — filling with zeros",
+                               sat_id, band, exc)
+                missing_rad.extend(range(base, base + n_rad_frames))
+                missing["rad"].append(band)
+                continue
             if scene_cfg is None:
                 scene_cfg = cfg
             else:
@@ -898,7 +1068,7 @@ def _build_input_stack(
     np.nan_to_num(flow_arr, copy=False)
     np.nan_to_num(rad_arr, copy=False)
     np.nan_to_num(geom_arr, copy=False)
-    return flow_arr, rad_arr, geom_arr, finite_mask, scene_cfg
+    return flow_arr, rad_arr, geom_arr, finite_mask, scene_cfg, missing
 
 
 # ---------------------------------------------------------------------------
@@ -939,6 +1109,47 @@ def _forward_full_disk(
                 else:
                     out[k][r:r1_keep] = val[0, keep0:keep1].cpu().numpy()
     return out
+
+
+def quality_attrs(
+    flow_bands: list[str],
+    rad_bands: list[str],
+    missing: dict[str, list[str]],
+) -> dict:
+    """Describe how much of the requested input the retrieval actually got.
+
+    Zero-filled channels still produce winds — the network sees a valid
+    channel count — but with less information behind them, so the
+    shortfall travels with the data rather than being inferable only from
+    the run log.
+    """
+    # Count distinct bands: the flow set is a subset of the rad set, so a
+    # band absent from both would otherwise count twice and can tip the
+    # threshold on its own.
+    requested = list(dict.fromkeys(list(flow_bands) + list(rad_bands)))
+    absent = sorted(set(missing.get("flow", [])) | set(missing.get("rad", [])))
+    fraction = len(absent) / len(requested) if requested else 0.0
+    degraded = fraction > DEGRADED_BAND_FRACTION
+
+    if not absent:
+        note = "all requested bands available"
+    else:
+        note = (f"{len(absent)} of {len(requested)} requested bands were "
+                f"unavailable and zero-filled: {', '.join(absent)}")
+        if degraded:
+            note = ("DEGRADED QUALITY — " + note +
+                    f". Winds and heights here rest on "
+                    f"{len(requested) - len(absent)} channels and should be "
+                    f"treated as lower confidence.")
+    return {
+        "bands_requested": ",".join(requested),
+        "bands_missing": ",".join(absent),
+        "n_bands_requested": len(requested),
+        "n_bands_missing": len(absent),
+        "flow_bands_missing": ",".join(sorted(set(missing.get("flow", [])))),
+        "quality_degraded": int(degraded),
+        "quality_note": note,
+    }
 
 
 def _assemble_vars(
@@ -1005,7 +1216,7 @@ def infer_satellite(
                 sat_id, nominal.sub_lon_deg)
 
     rad_tf = int(getattr(model, "rad_time_frames", 1))
-    flow_arr, rad_arr, geom_arr, finite_mask, sat = _build_input_stack(
+    flow_arr, rad_arr, geom_arr, finite_mask, sat, missing = _build_input_stack(
         sat_id, t0, disp, flow_bands, rad_bands,
         rad_time_frames=rad_tf, prefetcher=prefetcher,
     )
@@ -1045,6 +1256,7 @@ def infer_satellite(
         },
         attrs={
             "satellite_id": sat_id,
+            **quality_attrs(flow_bands, rad_bands, missing),
             "sub_satellite_longitude": sat.sub_lon_deg,
             "sub_satellite_longitude_source": "scene projection metadata",
             "nominal_sub_satellite_longitude": nominal.sub_lon_deg,
@@ -1087,8 +1299,15 @@ class GlobalMosaic:
         # Use the same angular spacing for longitude; pixels are ~square at
         # the equator and compress toward the poles (equirectangular).
         self.resolution_m = resolution_m
-        self.lat_bins = np.arange(-90, 90 + dlat, dlat)
-        self.lon_bins = np.arange(-180, 180 + dlat, dlat)
+        self.step_deg = dlat
+        # Edges as exact multiples of the step rather than an accumulated
+        # arange, so a cell index can be computed arithmetically and still
+        # agree with the edges.  Cell counts are unchanged; edges move by
+        # under 1e-10 degrees.
+        n_lat = int(np.ceil(180.0 / dlat))
+        n_lon = int(np.ceil(360.0 / dlat))
+        self.lat_bins = -90.0 + np.arange(n_lat + 1) * dlat
+        self.lon_bins = -180.0 + np.arange(n_lon + 1) * dlat
         self.lat_centers = 0.5 * (self.lat_bins[:-1] + self.lat_bins[1:])
         self.lon_centers = 0.5 * (self.lon_bins[:-1] + self.lon_bins[1:])
         shape = (len(self.lat_centers), len(self.lon_centers))
@@ -1102,6 +1321,14 @@ class GlobalMosaic:
         self.source_index = np.full(shape, NO_SOURCE, dtype=np.int8)
         self.sources: list[str] = []
         self.time: str | None = None
+        # satellite -> its quality note, for satellites that contributed
+        self.quality: dict[str, dict] = {}
+
+    def _bin_index(self, values: np.ndarray, origin: float,
+                   n_bins: int) -> np.ndarray:
+        """Cell index for ``values`` on a uniform grid, clipped in range."""
+        idx = ((values - origin) / self.step_deg).astype(np.int64)
+        return np.clip(idx, 0, n_bins - 1, out=idx)
 
     def add(self, sat_id: str, ds: xr.Dataset) -> int:
         """Grid one satellite, keeping cells where it beats the zenith so far.
@@ -1112,6 +1339,13 @@ class GlobalMosaic:
                     sat_id, self.resolution_m)
         if self.time is None:
             self.time = ds.attrs.get("time")
+        if ds.attrs.get("n_bands_missing"):
+            self.quality[sat_id] = {
+                "missing": ds.attrs.get("bands_missing", ""),
+                "n_missing": int(ds.attrs.get("n_bands_missing", 0)),
+                "n_requested": int(ds.attrs.get("n_bands_requested", 0)),
+                "degraded": int(ds.attrs.get("quality_degraded", 0)),
+            }
 
         lat_2d = ds["latitude"].values
         lon_2d = ds["longitude"].values
@@ -1126,11 +1360,14 @@ class GlobalMosaic:
 
         flat_zen = ds["zenith_angle"].values[valid]
 
-        # Digitize into grid bins, reusing the flattened lat/lon buffers
-        ri = np.digitize(lat_2d[valid], self.lat_bins) - 1
-        ci = np.digitize(lon_2d[valid], self.lon_bins) - 1
-        np.clip(ri, 0, len(self.lat_centers) - 1, out=ri)
-        np.clip(ci, 0, len(self.lon_centers) - 1, out=ci)
+        # Which cell each pixel falls in.  The bins are uniform, so this
+        # is arithmetic rather than a binary search per pixel: ~50x
+        # faster than np.digitize over 20 M points, and verified to give
+        # identical indices on real full-disk geolocation.
+        ri = self._bin_index(lat_2d[valid], self.lat_bins[0],
+                             len(self.lat_centers))
+        ci = self._bin_index(lon_2d[valid], self.lon_bins[0],
+                             len(self.lon_centers))
 
         # Where this satellite beats the current best zenith
         better = flat_zen < self.best_zen[ri, ci]
@@ -1155,6 +1392,37 @@ class GlobalMosaic:
                     sat_id, n_won, n_valid)
         return n_won
 
+    def _quality_attrs(self) -> dict:
+        """Which contributors ran on incomplete input, and how badly.
+
+        The mosaic takes each cell from one satellite, so quality varies
+        across the grid: ``source_satellite_index`` says which satellite
+        a cell came from, and these attributes say what that satellite
+        was working with.
+        """
+        contributing = {s: q for s, q in self.quality.items()
+                        if s in self.sources}
+        if not contributing:
+            return {"quality_degraded": 0,
+                    "quality_note": "all contributing satellites had every "
+                                    "requested band"}
+        detail = "; ".join(
+            f"{sat}: {q['n_missing']}/{q['n_requested']} bands missing"
+            f"{' (DEGRADED)' if q['degraded'] else ''} [{q['missing']}]"
+            for sat, q in sorted(contributing.items()))
+        degraded = sorted(s for s, q in contributing.items() if q["degraded"])
+        note = ("Some contributing satellites ran on incomplete input. "
+                + detail)
+        if degraded:
+            note = (f"DEGRADED QUALITY over cells sourced from "
+                    f"{', '.join(degraded)} — " + detail +
+                    ". Use source_satellite_index to find the affected cells.")
+        return {
+            "quality_degraded": int(bool(degraded)),
+            "degraded_satellites": ",".join(degraded),
+            "quality_note": note,
+        }
+
     def to_dataset(self) -> xr.Dataset:
         """Assemble the accumulated grids into the output dataset."""
         ds_global = xr.Dataset(
@@ -1169,6 +1437,7 @@ class GlobalMosaic:
                 "merge_rule": "minimum zenith angle (closest to sub-satellite point)",
                 "satellites": list(self.sources),
                 "time": self.time,
+                **self._quality_attrs(),
             },
         )
         ds_global["source_satellite_index"] = (
@@ -1231,119 +1500,6 @@ def merge_global(
 # Icechunk output (optional): append the global mosaic along a time axis
 # ---------------------------------------------------------------------------
 
-# Pin the time encoding on creation.  Without this xarray picks units from
-# the first timestamp ("days since <t0>") and later appends re-encode
-# against a different unit, silently corrupting every appended timestamp.
-_TIME_ENCODING = {
-    "units": "seconds since 1970-01-01T00:00:00",
-    "calendar": "proleptic_gregorian",
-    "dtype": "int64",
-}
-
-
-def icechunk_storage(
-    uri: str,
-    endpoint_url: str | None = None,
-    region: str | None = None,
-    anonymous: bool = False,
-    force_path_style: bool = False,
-):
-    """Build icechunk Storage for ``s3://bucket/prefix`` or a local path."""
-    import icechunk
-
-    parsed = urlparse(uri)
-    if parsed.scheme in ("s3", "s3a"):
-        return icechunk.s3_storage(
-            bucket=parsed.netloc,
-            prefix=parsed.path.lstrip("/") or None,
-            region=region,
-            endpoint_url=endpoint_url,
-            anonymous=True if anonymous else None,
-            from_env=None if anonymous else True,
-            force_path_style=force_path_style,
-        )
-    if parsed.scheme in ("", "file"):
-        path = Path(parsed.path if parsed.scheme == "file" else uri)
-        path.mkdir(parents=True, exist_ok=True)
-        return icechunk.local_filesystem_storage(str(path))
-    raise ValueError(
-        f"Unsupported icechunk store URI {uri!r} — use s3://bucket/prefix "
-        f"or a local directory path"
-    )
-
-
-def open_icechunk_repo(uri: str, **storage_kwargs):
-    """Open the icechunk repository at ``uri``, creating it if absent."""
-    import icechunk
-
-    storage = icechunk_storage(uri, **storage_kwargs)
-    repo = icechunk.Repository.open_or_create(storage)
-    logger.info("Icechunk store ready: %s", uri)
-    return repo
-
-
-def icechunk_existing_times(repo, branch: str = "main") -> set[datetime]:
-    """Timestamps already committed to the store (empty if it is new)."""
-    try:
-        ds = xr.open_zarr(repo.readonly_session(branch).store, consolidated=False)
-    except Exception:
-        logger.info("Icechunk store has no dataset yet — starting fresh")
-        return set()
-    if "time" not in ds.coords:
-        return set()
-    times = {pd.Timestamp(v).to_pydatetime() for v in ds["time"].values}
-    logger.info("Icechunk store already holds %d timestamp(s)", len(times))
-    return times
-
-
-def _mosaic_with_time(ds_global: xr.Dataset, t0: datetime) -> xr.Dataset:
-    """Add a length-1 time dimension so the mosaic can be appended."""
-    ds = ds_global.expand_dims(time=[np.datetime64(t0, "ns")])
-    # Attributes that vary per timestamp belong on the variable, not the
-    # store; keep only what is invariant across the whole time series.
-    ds.attrs = {k: v for k, v in ds_global.attrs.items()
-                if k not in ("time", "satellites")}
-    ds.attrs["satellites"] = ",".join(ds_global.attrs.get("satellites", []))
-    return ds
-
-
-def _store_has_dataset(session) -> bool:
-    """True if the store already holds a time-dimensioned dataset."""
-    try:
-        ds = xr.open_zarr(session.store, consolidated=False)
-    except Exception:
-        return False
-    return "time" in ds.coords
-
-
-def write_mosaic_to_icechunk(
-    repo,
-    ds_global: xr.Dataset,
-    t0: datetime,
-    branch: str = "main",
-    chunk: int = 1024,
-) -> None:
-    """Append one global mosaic to the icechunk store as a new commit."""
-    ds = _mosaic_with_time(ds_global, t0)
-    session = repo.writable_session(branch)
-
-    if not _store_has_dataset(session):
-        encoding: dict[str, dict] = {"time": dict(_TIME_ENCODING)}
-        for name, var in ds.data_vars.items():
-            encoding[name] = {
-                "chunks": (1, min(chunk, var.shape[1]), min(chunk, var.shape[2])),
-            }
-        ds.to_zarr(session.store, mode="w", consolidated=False,
-                   zarr_format=3, encoding=encoding)
-        logger.info("Created icechunk dataset (chunks %d x %d)", chunk, chunk)
-    else:
-        ds.to_zarr(session.store, mode="a-", append_dim="time",
-                   consolidated=False)
-
-    commit = session.commit(f"student AMV global mosaic {time_tag(t0)}")
-    logger.info("Committed %s to icechunk (%s)", time_tag(t0), commit)
-
-
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -1405,10 +1561,19 @@ def process_time(
         logger.warning("Unknown satellite %r, skipping", unknown)
 
     rad_tf = int(getattr(model, "rad_time_frames", 1)) if model is not None else 1
-    if prefetcher is not None and todo:
-        # Start the first satellite's reads before anything else happens.
-        prefetcher.submit(scene_requests(todo[0], t0, flow_bands, rad_bands,
+
+    def queue(sat_id: str) -> None:
+        """Start this satellite's reads, unless it will be skipped."""
+        if prefetcher is None:
+            return
+        if not _needs_inference(sat_id, t0, out_dir, skip_existing, write_netcdf):
+            return
+        prefetcher.submit(scene_requests(sat_id, t0, flow_bands, rad_bands,
                                          rad_tf))
+
+    if todo:
+        # Start the first satellite's reads before anything else happens.
+        queue(todo[0])
 
     for i, sat_id in enumerate(todo):
         nc_path = sat_nc_path(out_dir, sat_id, t0)
@@ -1421,11 +1586,10 @@ def process_time(
             except Exception:
                 logger.exception("Failed to read %s — recomputing", nc_path)
                 ds = None
-        if prefetcher is not None and i + 1 < len(todo):
+        if i + 1 < len(todo):
             # Queue the next satellite now: its downloads then overlap this
             # satellite's forward pass instead of following it.
-            prefetcher.submit(scene_requests(todo[i + 1], t0, flow_bands,
-                                             rad_bands, rad_tf))
+            queue(todo[i + 1])
         if ds is None:
             try:
                 ds = infer_satellite(
@@ -1451,13 +1615,17 @@ def process_time(
         log_peak_rss(f"[{tag}] after {sat_id}")
 
     if not done:
+        if prefetcher is not None:
+            prefetcher.reset()
         logger.error("[%s] No satellites produced output.", tag)
         return False
 
     logger.info("[%s] Completed %d/%d satellites: %s",
                 tag, len(done), len(sats), done)
     if prefetcher is not None:
-        logger.info("[%s] %s", tag, prefetcher.cache.summary())
+        left = prefetcher.reset()
+        logger.info("[%s] %s%s", tag, prefetcher.cache.summary(),
+                    f", released {left} unread prefetch(es)" if left else "")
 
     if mosaic is not None:
         logger.info("[%s] Assembling global mosaic (%.0f m grid)...",
@@ -1635,16 +1803,29 @@ def main():
     if args.download_workers is not None:
         os.environ["STEREO_WINDS_DOWNLOAD_WORKERS"] = str(args.download_workers)
 
+    reusable = scene_cache_is_useful(args.step_minutes, sats) and len(times) > 1
     if args.scene_cache_gb is not None:
         cache_bytes = int(args.scene_cache_gb * 2**30)
+    elif not reusable:
+        # Nothing read at this timestamp will be read at the next one, so
+        # a large cache would just accumulate scenes until the kernel
+        # takes exception to it.
+        cache_bytes = NO_REUSE_CACHE_BYTES
+        logger.info(
+            "--step-minutes %d is more than twice every satellite's scan "
+            "interval, so no scene is read twice: holding the scene cache "
+            "to %.1f GB rather than filling memory with scenes that will "
+            "never be reused", args.step_minutes, cache_bytes / 2**30)
     else:
+        # The navigation grids are cached too; that memory is not
+        # available to the scene cache.
         cache_bytes = default_scene_cache_bytes(
-            reserve=int(args.memory_reserve_gb * 2**30))
+            reserve=int(args.memory_reserve_gb * 2**30) + grid_cache_budget())
     available = available_memory_bytes()
-    logger.info("Scene cache: %.1f GB (%.1f GB memory available, %.1f GB "
-                "reserved for the working set)",
-                cache_bytes / 2**30,
-                (available or 0) / 2**30, args.memory_reserve_gb)
+    logger.info("Scene cache: %.1f GB (%.1f GB available, %.1f GB reserved "
+                "for the working set, %.1f GB for navigation grids)",
+                cache_bytes / 2**30, (available or 0) / 2**30,
+                args.memory_reserve_gb, grid_cache_budget() / 2**30)
     prefetcher = None
     if args.prefetch_workers > 0:
         prefetcher = ScenePrefetcher(SceneCache(cache_bytes),
