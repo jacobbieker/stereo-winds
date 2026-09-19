@@ -110,6 +110,8 @@ def synthetic_scene(
     nx: int = 64,
     zenith: float = 10.0,
     bands_missing: tuple[str, ...] = (),
+    lat_range: tuple[float, float] | None = None,
+    lon_range: tuple[float, float] | None = None,
 ) -> xr.Dataset:
     """Build a per-satellite AMV dataset shaped like ``infer_satellite``'s output.
 
@@ -142,10 +144,15 @@ def synthetic_scene(
         raise ValueError(f"ny and nx must be positive, got ({ny}, {nx})")
 
     sub_lon = _sub_lon(sat_id)
-    lat_1d = np.linspace(-_HALF_SPAN_DEG, _HALF_SPAN_DEG, ny, dtype=np.float64)
-    lon_1d = np.linspace(
-        sub_lon - _HALF_SPAN_DEG, sub_lon + _HALF_SPAN_DEG, nx, dtype=np.float64
-    )
+    # By default the footprint sits on the satellite's sub-point, so
+    # scenes land where the real ones would.  An explicit range lets a
+    # test place two scenes in a chosen overlap instead.
+    lat_lo, lat_hi = lat_range if lat_range is not None else (
+        -_HALF_SPAN_DEG, _HALF_SPAN_DEG)
+    lon_lo, lon_hi = lon_range if lon_range is not None else (
+        sub_lon - _HALF_SPAN_DEG, sub_lon + _HALF_SPAN_DEG)
+    lat_1d = np.linspace(lat_lo, lat_hi, ny, dtype=np.float64)
+    lon_1d = np.linspace(lon_lo, lon_hi, nx, dtype=np.float64)
     lon_2d, lat_2d = np.meshgrid(lon_1d, lat_1d)
     # Keep longitudes in [-180, 180) the way the real navigation does.
     lon_2d = ((lon_2d + 180.0) % 360.0) - 180.0
@@ -183,7 +190,8 @@ def synthetic_scene(
             "satellite_id": sat_id,
             "time": str(t0),
             "source": "student_amv",
-            **synthetic_quality_attrs(bands_missing),
+            **(synthetic_quality_attrs(bands_missing)
+               if bands_missing else {}),
         },
     )
 
