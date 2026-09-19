@@ -259,7 +259,7 @@ def build_mosaic_assets(
     def _global_mosaic(
         context: AssetExecutionContext,
         paths: PathsResource,
-        settings: RunSettingsResource,
+        run_settings: RunSettingsResource,
     ) -> str:
         """Merge the cycle's per-satellite retrievals into one global mosaic.
 
@@ -272,14 +272,14 @@ def build_mosaic_assets(
         """
         t0 = time_for(context.partition_key)
         output_dir = Path(paths.output_dir)
-        expected = list(settings.satellites)
+        expected = list(run_settings.satellites)
 
         undeclared = sorted(set(expected) - set(declared))
         if undeclared:
             # Not a dependency, so nothing orders the mosaic after them:
             # they would look like an outage whenever they run late.
             logger.warning(
-                "settings.satellites includes %s, which this asset does not "
+                "run_settings.satellites includes %s, which this asset does not "
                 "declare as a dependency — rebuild the assets with "
                 "build_mosaic_assets(satellites=...) so scheduling matches",
                 ", ".join(undeclared),
@@ -301,7 +301,7 @@ def build_mosaic_assets(
                 },
             )
 
-        ds_global = build_mosaic(per_sat, t0, resolution_m=settings.resolution_m)
+        ds_global = build_mosaic(per_sat, t0, resolution_m=run_settings.resolution_m)
         loaded = sorted(per_sat)
         # The per-satellite datasets are full disks; let them go before the
         # mosaic is serialised.
@@ -358,7 +358,7 @@ def build_mosaic_assets(
             "valid_cells": valid_cells,
             "valid_cell_fraction": round(valid_cells / n_cells, 6) if n_cells else 0.0,
             "grid_shape": f"{source_index.shape[0]} x {source_index.shape[1]}",
-            "resolution_m": float(settings.resolution_m),
+            "resolution_m": float(run_settings.resolution_m),
         })
         return str(out_path)
 
@@ -377,7 +377,7 @@ def build_mosaic_assets(
         context: AssetExecutionContext,
         global_mosaic: str,
         store: IcechunkStoreResource,
-        settings: RunSettingsResource,
+        run_settings: RunSettingsResource,
     ) -> str:
         """Append one mosaic to the icechunk store.
 
@@ -403,7 +403,7 @@ def build_mosaic_assets(
             t0,
             branch=store.branch,
             chunk=store.chunk,
-            skip_existing=settings.skip_existing,
+            skip_existing=run_settings.skip_existing,
         )
 
         times = sorted(existing_timestamps(repo, store.branch))
