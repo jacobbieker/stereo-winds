@@ -26,7 +26,8 @@ from operational.core import availability as availability_mod
 from operational.core.watermark import WatermarkStore
 from operational.sensors import build_availability_sensor
 
-NOW = datetime(2026, 1, 2, 12, 0, tzinfo=timezone.utc)
+# Naive UTC, matching the watermark store and the ring script.
+NOW = datetime(2026, 1, 2, 12, 0)
 SATS = ("goes18", "goes19")
 
 
