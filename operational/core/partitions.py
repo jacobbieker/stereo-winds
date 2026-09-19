@@ -521,7 +521,7 @@ def __getattr__(name: str):
         from operational.config import OperationalConfig
 
         value = build_partitions_def(
-            DEFAULT_START, OperationalConfig().cadence_minutes)
+            DEFAULT_START, OperationalConfig.from_env().cadence_minutes)
         globals()[name] = value          # cache; __getattr__ won't run again
         return value
     raise AttributeError(
