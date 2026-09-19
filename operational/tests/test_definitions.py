@@ -154,10 +154,15 @@ class TestDefinitionsLoad:
 
     def test_partition_keys_use_the_agreed_format(self):
         spec = next(iter(defs.resolve_all_asset_specs()))
+        # Anchored on DEFAULT_START rather than a literal date, so
+        # moving the start of the partition space cannot silently turn
+        # this into a test of nothing.
+        from operational.core.partitions import DEFAULT_START, key_for
+
         keys = spec.partitions_def.get_partition_keys(
             current_time=datetime(2026, 1, 1, 3, 0, tzinfo=timezone.utc)
         )
-        assert keys[0] == "2026-01-01-00:00"
+        assert keys[0] == key_for(DEFAULT_START)
 
     def test_mosaic_depends_on_every_satellite(self):
         graph = defs.resolve_asset_graph()
@@ -456,9 +461,9 @@ class TestSensors:
             assert sensor.job_name in job_names
 
     def test_expected_sensor_name(self):
-        from operational.sensors import AVAILABILITY_SENSOR_NAME
+        from operational.sensors import DEFAULT_SENSOR_NAME
 
-        assert AVAILABILITY_SENSOR_NAME in {sensor.name for sensor in defs.sensors}
+        assert DEFAULT_SENSOR_NAME in {sensor.name for sensor in defs.sensors}
 
     def test_discovery_deduplicates_aliases(self):
         # A sensor re-exported under a second name must not be
@@ -550,7 +555,7 @@ class TestResources:
         config = OperationalConfig(store_uri="local/store.icechunk", device="cpu")
         resources = default_resources(config, env={})
         assert resources["store"].store_uri == "local/store.icechunk"
-        assert resources["model"].checkpoint_path == DEFAULT_CHECKPOINT
+        assert resources["model"].student_ckpt == DEFAULT_CHECKPOINT
         assert resources["model"].device == "cpu"
 
     def test_process_environment_is_bound_late(self, monkeypatch, tmp_path):
@@ -563,7 +568,7 @@ class TestResources:
         # run launches, so repointing it needs no redeploy.
         assert isinstance(resources["store"].store_uri, EnvVar)
         assert resources["store"].store_uri.env_var_name == "STEREO_WINDS_OP_STORE_URI"
-        assert resources["model"].checkpoint_path.env_var_name == CHECKPOINT_ENV_VAR
+        assert resources["model"].student_ckpt.env_var_name == CHECKPOINT_ENV_VAR
         assert resources["model"].device.env_var_name == "STEREO_WINDS_OP_DEVICE"
         assert resources["paths"].output_dir.env_var_name == (
             "STEREO_WINDS_OP_OUTPUT_DIR"

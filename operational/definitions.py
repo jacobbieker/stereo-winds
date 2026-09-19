@@ -110,6 +110,8 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "CHECKPOINT_ENV_VAR",
     "DEFAULT_CHECKPOINT",
+    "DEFAULT_RAFT_CHECKPOINT",
+    "RAFT_CHECKPOINT_ENV_VAR",
     "build_definitions",
     "check_mosaic_inputs",
     "check_satellite_agreement",
@@ -126,6 +128,15 @@ CHECKPOINT_ENV_VAR = "STEREO_WINDS_OP_CHECKPOINT"
 #: Checkpoint path when nothing overrides it.  Not read at import time,
 #: so it is allowed not to exist on the machine loading this module.
 DEFAULT_CHECKPOINT = "checkpoints/student_zeus.ckpt"
+
+#: RAFT optical-flow checkpoint.  ModelResource needs both this and the
+#: student checkpoint: the student predicts winds, RAFT supplies the
+#: displacement field it is conditioned on.
+DEFAULT_RAFT_CHECKPOINT = "checkpoints/windflow.raft.sonde-tuned.ckpt"
+
+#: Environment override for the RAFT checkpoint, matching the name the
+#: rest of the repo already uses.
+RAFT_CHECKPOINT_ENV_VAR = "STEREO_WINDS_RAFT_CKPT"
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +288,9 @@ def default_resources(
             store_uri=_env_or("STEREO_WINDS_OP_STORE_URI", cfg.store_uri, env),
         ),
         "model": ModelResource(
-            checkpoint_path=_env_or(CHECKPOINT_ENV_VAR, DEFAULT_CHECKPOINT, env),
+            student_ckpt=_env_or(CHECKPOINT_ENV_VAR, DEFAULT_CHECKPOINT, env),
+            raft_ckpt=_env_or(
+                RAFT_CHECKPOINT_ENV_VAR, DEFAULT_RAFT_CHECKPOINT, env),
             device=_env_or("STEREO_WINDS_OP_DEVICE", cfg.device, env),
             row_strip=cfg.row_strip,
         ),
