@@ -226,7 +226,9 @@ class TestMosaicAttributes:
 
     def test_scene_time_is_kept_and_nominal_time_added(self):
         ds = build_mosaic({"goes19": _scene("goes19")}, T0, resolution_m=RES)
-        assert ds.attrs["time"] == T0.isoformat()
+        # The scene's own ``time`` is passed through untouched, and
+        # infer_satellite writes it with str(), not isoformat().
+        assert ds.attrs["time"] == str(T0)
         assert ds.attrs["nominal_time"] == T0.isoformat()
 
     def test_time_falls_back_to_t0_when_no_scene_carries_one(self):
