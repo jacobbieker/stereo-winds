@@ -13,12 +13,17 @@ the names the repository's own tests use (``infer_student_global_ring``,
 ``ring_prefetch``, ``write_mosaics``, ``ring_msg``) so the two loads
 cannot collide.
 
-Nothing here reimplements the upstream logic; every public name below is
-the script's own object, re-exported so that static readers and IDEs can
-see what the operational code depends on.  If one of them ever disappears
-upstream, importing this module fails immediately with an explicit
-message instead of raising :class:`AttributeError` deep inside a Dagster
-run.
+The script is found relative to this file, so the adapter works from any
+cwd and from a git worktree; set ``STEREO_WINDS_RING_SCRIPT`` to point it
+elsewhere, per the repo's convention that host paths live in env vars.
+
+Nothing here reimplements the upstream logic.  Functions and classes are
+re-exported as the script's own objects; the three mutable constants are
+re-exported as copies, so a caller appending to :data:`OUTPUT_VARS`
+cannot break ``GlobalMosaic`` halfway through a mosaic.  If any
+re-exported name ever disappears upstream, importing this module fails
+immediately with a message listing every casualty, instead of raising
+:class:`AttributeError` deep inside a Dagster run.
 
 Examples
 --------
@@ -31,6 +36,7 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import os
 import sys
 import threading
 from datetime import datetime
@@ -47,6 +53,7 @@ __all__ = [
     "load_ring",
     "REPO_ROOT",
     "RING_SCRIPT",
+    "RING_SCRIPT_ENV",
     "RING_MODULE_NAME",
     "infer_satellite",
     "GlobalMosaic",
@@ -69,13 +76,24 @@ __all__ = [
 #: from any cwd and from a git worktree.
 REPO_ROOT: Path = Path(__file__).resolve().parents[2]
 
+#: Environment variable that overrides the script location, for layouts
+#: where ``scripts/`` does not sit next to this package.
+RING_SCRIPT_ENV: str = "STEREO_WINDS_RING_SCRIPT"
+
 #: Absolute path of the CLI script this module wraps.
-RING_SCRIPT: Path = REPO_ROOT / "scripts" / "infer_student_global_ring.py"
+RING_SCRIPT: Path = Path(
+    os.environ.get(
+        RING_SCRIPT_ENV,
+        str(REPO_ROOT / "scripts" / "infer_student_global_ring.py"),
+    )
+).expanduser()
 
 #: ``sys.modules`` key the script is registered under.
 RING_MODULE_NAME: str = "operational_ring"
 
-#: Names the operational package depends on; each must exist upstream.
+#: Every name this module re-exports.  Checked against the loaded
+#: script in one pass, so a rename upstream names all the casualties
+#: at once rather than only the first.
 _REQUIRED_NAMES: tuple[str, ...] = (
     "infer_satellite",
     "GlobalMosaic",
@@ -206,7 +224,31 @@ def _require(module: ModuleType, name: str) -> Any:
         ) from None
 
 
+def _check_required(module: ModuleType) -> None:
+    """Fail loudly if the script stopped defining a re-exported name.
+
+    Parameters
+    ----------
+    module : types.ModuleType
+        The loaded ring script module.
+
+    Raises
+    ------
+    AttributeError
+        Naming every missing symbol, not only the first one bound below.
+    """
+    missing = [name for name in _REQUIRED_NAMES if not hasattr(module, name)]
+    if missing:
+        raise AttributeError(
+            f"{RING_SCRIPT} no longer defines {', '.join(map(repr, missing))}, "
+            f"which operational.adapters.ring re-exports. Either the script "
+            f"was refactored or this adapter is out of date; update the "
+            f"re-export list in operational/adapters/ring.py to match."
+        )
+
+
 _ring = load_ring()
+_check_required(_ring)
 
 infer_satellite: Callable[..., xr.Dataset] = _require(_ring, "infer_satellite")
 """Run student inference for one satellite and return an ``(y, x)`` dataset.
@@ -274,16 +316,31 @@ tolerance_min=5.0, product="ABI-L1b-RadF")``. Queries availability, so it
 is a network call.
 """
 
-RING_SATELLITES: list[str] = _require(_ring, "RING_SATELLITES")
-"""The geostationary ring, in longitude order from west to east."""
+RING_SATELLITES: list[str] = list(_require(_ring, "RING_SATELLITES"))
+"""The geostationary ring, in longitude order from west to east.
 
-OUTPUT_VARS: list[str] = _require(_ring, "OUTPUT_VARS")
-"""AMV variables carried by per-satellite datasets and by the mosaic."""
+A copy: the script iterates its own list, so mutating this one cannot
+corrupt a running mosaic.
+"""
+
+OUTPUT_VARS: list[str] = list(_require(_ring, "OUTPUT_VARS"))
+"""AMV variables carried by per-satellite datasets and by the mosaic.
+
+A copy, for the same reason as :data:`RING_SATELLITES`: ``GlobalMosaic``
+indexes its accumulator by the script's own list, and an appended entry
+there would raise ``KeyError`` for every satellite.
+"""
 
 DT_MINUTES: int = _require(_ring, "DT_MINUTES")
 """Default temporal-pair spacing, in minutes."""
 
-SCAN_INTERVAL_MINUTES: dict[str, int] = _require(_ring, "SCAN_INTERVAL_MINUTES")
-"""Per-satellite overrides of :data:`DT_MINUTES` for the scan cycle."""
+SCAN_INTERVAL_MINUTES: dict[str, int] = dict(
+    _require(_ring, "SCAN_INTERVAL_MINUTES")
+)
+"""Per-satellite overrides of :data:`DT_MINUTES` for the scan cycle.
+
+A copy; call :func:`scan_interval` rather than reading this directly,
+since it applies the default for the satellites absent from it.
+"""
 
 del _ring
