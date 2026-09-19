@@ -91,11 +91,18 @@ def _fake_infer(calls: list[tuple[str, datetime]]):
                         device="cuda", row_strip=1024, **kwargs):
         calls.append((sat_id, t0))
         ny, nx = SCENE_SHAPE
-        return synthetic_scene(
+        ds = synthetic_scene(
             sat_id, t0, ny=ny, nx=nx,
             zenith=ZENITH.get(sat_id, 10.0),
             bands_missing=DEGRADED_BANDS if sat_id == DEGRADED_SAT else (),
         )
+        # The shared fixture varies the winds smoothly across the disk.
+        # These tests need one constant value per satellite instead, so
+        # a mosaic cell can be traced back to the satellite that won it.
+        u, v = synthetic_wind(sat_id)
+        ds["u_wind"].values[...] = u
+        ds["v_wind"].values[...] = v
+        return ds
 
     return infer_satellite
 
@@ -140,6 +147,11 @@ def pipeline_run(tmp_path_factory):
     patcher.setattr(ring, "infer_satellite", fake)
     if hasattr(core_amv, "infer_satellite"):
         patcher.setattr(core_amv, "infer_satellite", fake, raising=False)
+    # The asset resolves the model before it calls the retrieval, so
+    # patching only the retrieval still demands a real checkpoint.
+    # The fake ignores the model it is handed, so None is enough.
+    patcher.setattr(ModelResource, "model", lambda self: None)
+    patcher.setattr(ModelResource, "disparity", lambda self: None)
 
     try:
         assets = [
@@ -158,7 +170,7 @@ def pipeline_run(tmp_path_factory):
             ),
             "model": ModelResource(student_ckpt="", raft_ckpt="",
                                    device="cpu"),
-            "settings": RunSettingsResource(
+            "run_settings": RunSettingsResource(
                 satellites=list(SATELLITES),
                 resolution_m=RESOLUTION_M,
                 row_strip=64,
