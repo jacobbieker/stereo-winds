@@ -85,7 +85,11 @@ __all__ = [
 
 MOSAIC_GROUP = "mosaic"
 
-_CONFIG = OperationalConfig()
+# From the environment, matching amv_assets and definitions.py: the
+# deps global_mosaic declares must name the same satellites the AMV
+# layer actually defines assets for, or dagster treats the difference
+# as external assets nothing materialises.
+_CONFIG = OperationalConfig.from_env()
 
 #: Publishing is a write to an object store, so it fails for reasons that
 #: go away on their own.  Retrying is safe in the deployment's default
