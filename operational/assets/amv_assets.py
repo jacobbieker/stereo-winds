@@ -267,7 +267,13 @@ def build_amv_assets(
     }
 
 
-DEFAULT_CONFIG = OperationalConfig()
+# Read from the environment, not bare defaults: definitions.py shapes
+# the code location with OperationalConfig.from_env(), and the asset
+# set has to agree with it.  Built from bare defaults, the assets
+# ignored STEREO_WINDS_OP_SATELLITES entirely -- the satellite list
+# reached the resources but never the graph, so a deployment
+# configured for two satellites still defined assets for four.
+DEFAULT_CONFIG = OperationalConfig.from_env()
 
 #: Partitions the default asset set is built on.
 AMV_PARTITIONS_DEF = build_partitions_def(
