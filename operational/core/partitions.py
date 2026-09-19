@@ -49,6 +49,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "DEFAULT_START",
+    "OPERATIONAL_PARTITIONS",
     "PARTITION_KEY_FORMAT",
     "MINUTES_PER_DAY",
     "align_to_cadence",
@@ -498,3 +500,29 @@ def build_partitions_def(
         fmt=PARTITION_KEY_FORMAT,
         timezone="UTC",
     )
+
+
+#: First partition of the operational time space.  Chosen to predate any
+#: satellite archive this pipeline reads, so a backfill can reach as far
+#: back as the stores allow without redefining the partition set (which
+#: would invalidate every existing partition key).
+DEFAULT_START = datetime(2024, 1, 1, 0, 0)
+
+
+def __getattr__(name: str):
+    """Build :data:`OPERATIONAL_PARTITIONS` on first access.
+
+    Evaluating it eagerly would import dagster at module import, which
+    this module deliberately avoids so ``operational.core`` stays usable
+    -- and testable -- without the orchestrator installed.  PEP 562 lets
+    ``from ... import OPERATIONAL_PARTITIONS`` work regardless.
+    """
+    if name == "OPERATIONAL_PARTITIONS":
+        from operational.config import OperationalConfig
+
+        value = build_partitions_def(
+            DEFAULT_START, OperationalConfig().cadence_minutes)
+        globals()[name] = value          # cache; __getattr__ won't run again
+        return value
+    raise AttributeError(
+        f"module {__name__!r} has no attribute {name!r}")
