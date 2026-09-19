@@ -46,6 +46,49 @@ _SUB_LON_DEG = {
 #: Half-width, in degrees, of a synthetic scene footprint.
 _HALF_SPAN_DEG = 30.0
 
+#: Public names for the two constants above.  The integration tests
+#: build their coverage expectations from them, so they are part of
+#: this module's contract rather than private detail.
+SUB_LON_DEG = _SUB_LON_DEG
+HALF_WIDTH_DEG = _HALF_SPAN_DEG
+
+#: Stand-in for the band set the student model is fed.
+SYNTHETIC_BANDS = [
+    "C07", "C08", "C09", "C10", "C11", "C13", "C14", "C15",
+]
+
+
+def synthetic_wind(sat_id: str) -> tuple[float, float]:
+    """Wind components this satellite reports, distinct per satellite.
+
+    Deterministic, so a test can name the satellite it expects to have
+    won a mosaic cell from the value it finds there.
+    """
+    rank = sorted(SUB_LON_DEG).index(sat_id) if sat_id in SUB_LON_DEG else 0
+    return 10.0 + rank, -3.0 - rank
+
+
+def synthetic_quality_attrs(bands_missing: tuple[str, ...] = ()) -> dict:
+    """Quality attributes shaped like ``quality_attrs``' output."""
+    absent = sorted(bands_missing)
+    requested = list(SYNTHETIC_BANDS)
+    degraded = len(absent) / len(requested) > 0.25
+    if not absent:
+        note = "all requested bands available"
+    else:
+        note = (f"{len(absent)} of {len(requested)} requested bands were "
+                f"unavailable and zero-filled: {', '.join(absent)}")
+        if degraded:
+            note = "DEGRADED QUALITY - " + note
+    return {
+        "bands_requested": ",".join(requested),
+        "bands_missing": ",".join(absent),
+        "n_bands_requested": len(requested),
+        "n_bands_missing": len(absent),
+        "quality_degraded": int(degraded),
+        "quality_note": note,
+    }
+
 
 def _sub_lon(sat_id: str) -> float:
     """Sub-satellite longitude for ``sat_id``, from the real config if known."""
@@ -66,6 +109,7 @@ def synthetic_scene(
     ny: int = 64,
     nx: int = 64,
     zenith: float = 10.0,
+    bands_missing: tuple[str, ...] = (),
 ) -> xr.Dataset:
     """Build a per-satellite AMV dataset shaped like ``infer_satellite``'s output.
 
@@ -139,6 +183,7 @@ def synthetic_scene(
             "satellite_id": sat_id,
             "time": str(t0),
             "source": "student_amv",
+            **synthetic_quality_attrs(bands_missing),
         },
     )
 
