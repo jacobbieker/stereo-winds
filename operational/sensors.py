@@ -100,10 +100,17 @@ def _utcnow() -> datetime:
 
 
 def _as_utc(t: datetime) -> datetime:
-    """Return ``t`` as a timezone-aware UTC datetime (naive values are UTC)."""
+    """Return ``t`` as a *naive* UTC datetime (naive values are already UTC).
+
+    Naive UTC is this codebase's convention -- the ring script, the
+    watermark store and the partition helpers all speak it -- so the
+    sensor normalises inward rather than making everything it touches
+    timezone-aware.  Dagster hands us aware datetimes, and comparing one
+    of those against a watermark read back from disk raises TypeError.
+    """
     if t.tzinfo is None:
-        return t.replace(tzinfo=timezone.utc)
-    return t.astimezone(timezone.utc)
+        return t
+    return t.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 def _encode_cursor(watermarks: Mapping[str, datetime], tick_time: datetime) -> str:
