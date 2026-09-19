@@ -26,7 +26,11 @@ import xarray as xr
 pytest.importorskip("icechunk")
 pytest.importorskip("dagster")
 
-from dagster import RetryPolicy, materialize  # noqa: E402
+from dagster import (  # noqa: E402
+    FilesystemIOManager,
+    RetryPolicy,
+    materialize,
+)
 
 from operational.adapters import ring  # noqa: E402
 from operational.assets.amv_assets import (  # noqa: E402
@@ -68,9 +72,13 @@ def _sat_names(value) -> list[str]:
     """Normalise a ``satellites``-style attribute to a list of names.
 
     It can arrive as a real list, as a comma-separated string, or as a
-    list's ``repr`` after a NetCDF round trip.
+    list's ``repr`` after a NetCDF round trip.  Dagster metadata writes
+    "(none)" rather than an empty string, since an empty metadata value
+    renders as a blank cell in the UI.
     """
     if value is None:
+        return []
+    if str(value).strip() == "(none)":
         return []
     if isinstance(value, (list, tuple, np.ndarray)):
         return [str(v) for v in value]
@@ -246,7 +254,15 @@ class TestFailureAndResume:
                 resolution_m=TEST_RESOLUTION_M,
                 skip_existing=True,
             ),
-            "store": IcechunkStoreResource(uri=tmp_store_uri),
+            "store": IcechunkStoreResource(store_uri=tmp_store_uri),
+            # A stable IO-manager root, shared by every run() below.
+            # published_mosaic loads global_mosaic's output as an input,
+            # so with the default (a fresh temp dir per materialize call)
+            # publishing on its own cannot find what the mosaic step
+            # wrote in an earlier run -- which is exactly the resume
+            # sequence this test drives.
+            "io_manager": FilesystemIOManager(
+                base_dir=str(tmp_path / "io")),
         }
         assets = list(AMV_ASSETS) + [global_mosaic, published_mosaic]
 
