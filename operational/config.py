@@ -357,3 +357,14 @@ class OperationalConfig:
         config = cls(**kwargs)  # type: ignore[arg-type]
         logger.debug("Built OperationalConfig from environment: %s", config)
         return config
+
+
+#: Process-wide default configuration.
+#:
+#: Asset and job definitions are built at module import, before any
+#: Dagster resource exists to supply configuration, so they need a
+#: concrete config to shape themselves against.  Runtime overrides
+#: still arrive through the resources; this only fixes the *shape* of
+#: the definitions (which satellites get an asset, what cadence the
+#: partition space uses).
+DEFAULT_CONFIG = OperationalConfig()
