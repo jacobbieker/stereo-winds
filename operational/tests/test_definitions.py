@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import pathlib
 import sys
 import textwrap
 from datetime import datetime, timezone
@@ -208,7 +209,7 @@ class TestFullJob:
 
     def test_accepts_a_narrower_selection(self):
         job = build_full_job(name="probe_job", selection=[AssetKey("global_mosaic")])
-        probe = Definitions(assets=defs.assets, jobs=[job])
+        probe = Definitions(assets=defs.assets, jobs=[job], resources=defs.resources)
         assert _selected_keys(probe.resolve_job_def("probe_job")) == {
             AssetKey("global_mosaic")
         }
@@ -231,7 +232,7 @@ class TestSatelliteJobs:
         job = build_satellite_job(
             "goes18", [AssetKey("amv_goes18")], include_downstream=True
         )
-        probe = Definitions(assets=defs.assets, jobs=[job])
+        probe = Definitions(assets=defs.assets, jobs=[job], resources=defs.resources)
         selected = _selected_keys(probe.resolve_job_def(satellite_job_name("goes18")))
         assert selected == {
             AssetKey("amv_goes18"),
@@ -390,7 +391,8 @@ class TestBackstopSchedule:
         partitions = build_partitions_def(datetime(2026, 1, 1), 360)
         job = build_full_job(name="probe_job")
         schedule = build_backstop_schedule(job, partitions, name="probe_schedule")
-        probe = Definitions(assets=defs.assets, jobs=[job], schedules=[schedule])
+        probe = Definitions(assets=defs.assets, jobs=[job], schedules=[schedule],
+                          resources=defs.resources)
         # The job itself is hourly, so the boundary cron is the hourly one.
         assert probe.resolve_schedule_def("probe_schedule").cron_schedule == (
             "0 * * * *"
@@ -797,18 +799,71 @@ class TestImportIsSideEffectFree:
         assert "loadable" in result.stdout
 
 
+def _resources_without_checkpoints(config):
+    """Default resources, with the model left unconfigured.
+
+    These tests patch inference out, so no checkpoint is ever loaded --
+    but a ModelResource pointing at a path that does not exist fails
+    when the asset resolves it, before the patch matters.
+    """
+    from operational.resources import ModelResource
+
+    resources = dict(default_resources(config, env={}))
+    resources["model"] = ModelResource(
+        student_ckpt="", raft_ckpt="", device="cpu")
+    return resources
+
+
 class TestMaterializeOnePartition:
     """The wired graph actually runs, end to end, for one timestamp."""
+
+    @pytest.fixture(autouse=True)
+    def _no_real_inference(self, monkeypatch):
+        """Stand in for the retrieval, which needs a GPU and checkpoints.
+
+        Patched at ``run_satellite_amv`` rather than at
+        ``infer_satellite``: the asset resolves the model *before*
+        calling the retrieval, so patching deeper still demands a real
+        checkpoint.  Everything downstream -- the mosaic, the icechunk
+        write, the whole wiring -- runs for real, which is what these
+        tests are about.
+        """
+        from operational.assets import amv_assets
+        from operational.core.amv import AmvResult
+        from operational.adapters.ring import sat_nc_path
+        from operational.tests.conftest import synthetic_scene
+
+        def run_satellite_amv(sat_id, t0, model, disp, flow_bands,
+                              rad_bands, output_dir, **kwargs):
+            ds = synthetic_scene(sat_id, t0, ny=32, nx=32)
+            path = pathlib.Path(sat_nc_path(pathlib.Path(output_dir), sat_id, t0))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            ds.to_netcdf(path)
+            return AmvResult(
+                sat_id=sat_id, timestamp=t0, path=path, dataset=ds,
+                reused=False, n_bands_missing=0, bands_missing=(),
+                quality_degraded=False,
+            )
+
+        monkeypatch.setattr(amv_assets, "run_satellite_amv", run_satellite_amv)
+
+        # The asset resolves the model before it calls the retrieval,
+        # so the checkpoints have to be neutralised here too.
+        from operational.resources import ModelResource
+
+        monkeypatch.setattr(ModelResource, "model", lambda self: None)
+        monkeypatch.setattr(ModelResource, "disparity", lambda self: None)
 
     def test_full_graph_materializes(self, tmp_path):
         config = OperationalConfig(
             output_dir=tmp_path / "out",
             store_uri=str(tmp_path / "store.icechunk"),
+            resolution_m=200_000.0,
         )
         result = materialize(
             list(defs.assets),
             partition_key=A_PARTITION_KEY,
-            resources=default_resources(config, env={}),
+            resources=_resources_without_checkpoints(config),
         )
         assert result.success
         materialized = {
@@ -818,7 +873,11 @@ class TestMaterializeOnePartition:
         assert materialized == EXPECTED_ASSET_KEYS
 
     def test_one_satellite_materializes_on_its_own(self, tmp_path):
-        config = OperationalConfig(output_dir=tmp_path / "out")
+        config = OperationalConfig(
+            output_dir=tmp_path / "out",
+            store_uri=str(tmp_path / "store.icechunk"),
+            resolution_m=200_000.0,
+        )
         goes18 = [
             asset_def
             for asset_def in defs.assets
@@ -827,7 +886,7 @@ class TestMaterializeOnePartition:
         result = materialize(
             goes18,
             partition_key=A_PARTITION_KEY,
-            resources=default_resources(config, env={}),
+            resources=_resources_without_checkpoints(config),
         )
         assert result.success
 
