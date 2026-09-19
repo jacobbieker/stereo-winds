@@ -18,7 +18,17 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterator, Mapping
 
-from stereo_winds.student_dataset import DEFAULT_FLOW_BANDS, DEFAULT_RAD_BANDS
+# Mirrors ``stereo_winds.student_dataset.DEFAULT_FLOW_BANDS`` and
+# ``DEFAULT_RAD_BANDS``, restated rather than imported: that module
+# does ``import torch`` at module scope, and pulling torch in to read
+# two lists of strings would put it in the import path of every
+# dagster definition -- sensors, schedules, the whole code location.
+# ``test_resources.py`` fails if these drift from upstream.
+DEFAULT_FLOW_BANDS: tuple[str, ...] = ("C08", "C09", "C10", "C12", "C14")
+DEFAULT_RAD_BANDS: tuple[str, ...] = (
+    "C07", "C08", "C09", "C10", "C11",
+    "C12", "C13", "C14", "C15", "C16",
+)
 
 logger = logging.getLogger(__name__)
 
