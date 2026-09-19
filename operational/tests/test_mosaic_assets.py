@@ -64,7 +64,7 @@ def build_resources(output_dir: Path, store_uri: str, satellites=None) -> dict:
     return {
         "paths": PathsResource(output_dir=str(output_dir)),
         "store": IcechunkStoreResource(store_uri=store_uri, branch="main", chunk=64),
-        "settings": RunSettingsResource(
+        "run_settings": RunSettingsResource(
             satellites=list(SATELLITES if satellites is None else satellites),
             resolution_m=TEST_RESOLUTION_M,
             skip_existing=True,
@@ -139,7 +139,11 @@ class TestGlobalMosaicAsset:
             assert ds["u_wind"].dims == ("latitude", "longitude")
             assert set(ds.attrs) >= {"time", "satellites", "resolution_m",
                                      "quality_degraded", "quality_note"}
-            assert ds.attrs["satellites"] == "goes18,goes19"
+            # NetCDF keeps the upstream list; only the icechunk path
+            # normalises this attribute to a comma-separated string.
+            sats = ds.attrs["satellites"]
+            sats = sats.split(",") if isinstance(sats, str) else list(sats)
+            assert sats == ["goes18", "goes19"]
             assert ds.attrs["resolution_m"] == pytest.approx(TEST_RESOLUTION_M)
             # Both satellites won cells, and nowhere claims a third one.
             codes = set(ds["source_satellite_index"].values.ravel().tolist())
@@ -316,7 +320,7 @@ class TestPublishedMosaicAsset:
         assert second.success
         meta = materialization_metadata(second, "published_mosaic")
         assert meta["written"].value is False
-        assert "already present" in meta["skipped_reason"].value
+        assert "already in the store" in meta["skipped_reason"].value
         assert meta["time_size"].value == 1
 
         ds = read_store(tmp_store_uri)
