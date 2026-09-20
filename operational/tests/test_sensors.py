@@ -37,17 +37,7 @@ def _hours_ago(n: float) -> datetime:
 
 
 class StubAvailability:
-    """Recording stand-in for ``new_timestamps``.
-
-    Parameters
-    ----------
-    per_sat
-        Timestamps each satellite reports, before the ``since``/``until``
-        filtering the real implementation performs (applied here too, so the
-        sensor sees a realistic incremental answer).
-    raises
-        Satellites whose lookup should raise instead of answering.
-    """
+    """Recording stand-in for ``new_timestamps``."""
 
     def __init__(
         self,
@@ -128,9 +118,7 @@ class TestAvailabilitySensorEmission:
         assert requests[0].tags["operational/satellites"] == "goes18,goes19"
         assert requests[0].tags["operational/readiness_rule"] == "all"
 
-    def test_run_key_is_stable_for_the_same_partition(
-        self, monkeypatch, sensor_config, wm_path
-    ):
+    def test_run_key_is_stable_for_the_same_partition(self, monkeypatch, sensor_config, wm_path):
         stub = StubAvailability({s: [_hours_ago(1)] for s in SATS})
         monkeypatch.setattr(availability_mod, "new_timestamps", stub)
 
@@ -375,9 +363,7 @@ class TestReadinessRule:
 class TestResilience:
     """One failing archive must not take the tick down with it."""
 
-    def test_failing_satellite_does_not_abort_the_tick(
-        self, monkeypatch, sensor_config, wm_path
-    ):
+    def test_failing_satellite_does_not_abort_the_tick(self, monkeypatch, sensor_config, wm_path):
         stub = StubAvailability(
             {"goes18": [_hours_ago(1)], "goes19": [_hours_ago(1)]},
             raises={"goes19": RuntimeError("S3 listing timed out")},
@@ -564,15 +550,15 @@ class TestSparselyCoveredSatellites:
             cadence_minutes=60,
         )
 
-    def test_a_timestamp_is_emitted_although_mtg_has_nothing(
-        self, monkeypatch, tmp_path, wm_path
-    ):
+    def test_a_timestamp_is_emitted_although_mtg_has_nothing(self, monkeypatch, tmp_path, wm_path):
         """MTG and IODC have assets but must not hold up a timestamp."""
-        stub = StubAvailability({
-            "goes18": [_hours_ago(1)],
-            "goes19": [_hours_ago(1)],
-            "mtg-i1": [],
-        })
+        stub = StubAvailability(
+            {
+                "goes18": [_hours_ago(1)],
+                "goes19": [_hours_ago(1)],
+                "mtg-i1": [],
+            }
+        )
         monkeypatch.setattr(availability_mod, "new_timestamps", stub)
 
         results, _ = evaluate(make_sensor(self._config(tmp_path), wm_path))
@@ -583,11 +569,13 @@ class TestSparselyCoveredSatellites:
 
     def test_mtg_is_never_even_asked(self, monkeypatch, tmp_path, wm_path):
         """No point polling an archive whose answer cannot change the outcome."""
-        stub = StubAvailability({
-            "goes18": [_hours_ago(1)],
-            "goes19": [_hours_ago(1)],
-            "mtg-i1": [],
-        })
+        stub = StubAvailability(
+            {
+                "goes18": [_hours_ago(1)],
+                "goes19": [_hours_ago(1)],
+                "mtg-i1": [],
+            }
+        )
         monkeypatch.setattr(availability_mod, "new_timestamps", stub)
         evaluate(make_sensor(self._config(tmp_path), wm_path))
         assert stub.calls_for("mtg-i1") == []
@@ -595,11 +583,13 @@ class TestSparselyCoveredSatellites:
     def test_a_required_satellite_still_holds_the_timestamp_back(
         self, monkeypatch, tmp_path, wm_path
     ):
-        stub = StubAvailability({
-            "goes18": [_hours_ago(1)],
-            "goes19": [],
-            "mtg-i1": [_hours_ago(1)],
-        })
+        stub = StubAvailability(
+            {
+                "goes18": [_hours_ago(1)],
+                "goes19": [],
+                "mtg-i1": [_hours_ago(1)],
+            }
+        )
         monkeypatch.setattr(availability_mod, "new_timestamps", stub)
 
         results, _ = evaluate(make_sensor(self._config(tmp_path), wm_path))
