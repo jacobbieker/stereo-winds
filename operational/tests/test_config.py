@@ -18,14 +18,12 @@ class TestDefaults:
     def test_default_satellites(self):
         """The full ring, including the two icechunk-only satellites."""
         cfg = OperationalConfig()
-        assert cfg.satellites == (
-            "goes18", "goes19", "himawari9", "gk2a", "mtg-i1", "msg-iodc")
+        assert cfg.satellites == ("goes18", "goes19", "himawari9", "gk2a", "mtg-i1", "msg-iodc")
 
     def test_required_satellites_excludes_the_sparse_ones(self):
         """MTG and IODC get assets, but a run does not wait for them."""
         cfg = OperationalConfig()
-        assert cfg.required_satellites == (
-            "goes18", "goes19", "himawari9", "gk2a")
+        assert cfg.required_satellites == ("goes18", "goes19", "himawari9", "gk2a")
         assert set(cfg.required_satellites) <= set(cfg.satellites)
 
     def test_narrowing_the_ring_narrows_what_is_required(self):
@@ -40,8 +38,7 @@ class TestDefaults:
 
     def test_required_must_name_satellites_in_the_ring(self):
         with pytest.raises(ValueError, match="not in the ring"):
-            OperationalConfig(satellites=("goes19",),
-                              required_satellites=("gk2a",))
+            OperationalConfig(satellites=("goes19",), required_satellites=("gk2a",))
 
     def test_default_bands_match_student_dataset(self):
         from stereo_winds.student_dataset import (
@@ -69,8 +66,7 @@ class TestDefaults:
             cfg.device = "cuda"  # type: ignore[misc]
 
     def test_derived_timedeltas(self):
-        cfg = OperationalConfig(cadence_minutes=10,
-                                availability_tolerance_minutes=2.5)
+        cfg = OperationalConfig(cadence_minutes=10, availability_tolerance_minutes=2.5)
         assert cfg.cadence == timedelta(minutes=10)
         assert cfg.availability_tolerance == timedelta(minutes=2.5)
 
@@ -79,8 +75,7 @@ class TestOverrides:
     """Explicit construction, coercion and validation."""
 
     def test_sequences_are_coerced_to_tuples(self):
-        cfg = OperationalConfig(satellites=["goes19"], flow_bands=["C14"],
-                                rad_bands=["C13", "C14"])
+        cfg = OperationalConfig(satellites=["goes19"], flow_bands=["C14"], rad_bands=["C13", "C14"])
         assert cfg.satellites == ("goes19",)
         assert cfg.flow_bands == ("C14",)
         assert cfg.rad_bands == ("C13", "C14")
@@ -91,9 +86,12 @@ class TestOverrides:
         assert isinstance(cfg.output_dir, Path)
 
     def test_numeric_fields_are_cast(self):
-        cfg = OperationalConfig(cadence_minutes="15", resolution_m="2000",
-                                row_strip="64",
-                                availability_tolerance_minutes="1")
+        cfg = OperationalConfig(
+            cadence_minutes="15",
+            resolution_m="2000",
+            row_strip="64",
+            availability_tolerance_minutes="1",
+        )
         assert cfg.cadence_minutes == 15
         assert cfg.resolution_m == 2000.0
         assert cfg.row_strip == 64
@@ -103,8 +101,7 @@ class TestOverrides:
         cfg = OperationalConfig()
         narrowed = cfg.with_satellites("goes19")
         assert narrowed.satellites == ("goes19",)
-        assert cfg.satellites == (
-            "goes18", "goes19", "himawari9", "gk2a", "mtg-i1", "msg-iodc")
+        assert cfg.satellites == ("goes18", "goes19", "himawari9", "gk2a", "mtg-i1", "msg-iodc")
         assert narrowed.store_uri == cfg.store_uri
 
     @pytest.mark.parametrize(
@@ -165,9 +162,7 @@ class TestStoreUri:
         assert cfg.store_path is None
         assert cfg.store_bucket_prefix() == ("my-bucket", "amv")
 
-    @pytest.mark.parametrize(
-        "uri", ["gs://bucket/amv", "az://bucket/amv", "http://host/amv"]
-    )
+    @pytest.mark.parametrize("uri", ["gs://bucket/amv", "az://bucket/amv", "http://host/amv"])
     def test_unsupported_scheme_rejected(self, uri):
         with pytest.raises(ValueError, match="unsupported scheme"):
             OperationalConfig(store_uri=uri)
@@ -198,15 +193,15 @@ class TestTimestamps:
 
     def test_floor_hourly(self):
         cfg = OperationalConfig(cadence_minutes=60)
-        assert cfg.floor_to_cadence(
-            datetime(2024, 1, 15, 12, 47, 13)
-        ) == datetime(2024, 1, 15, 12, 0)
+        assert cfg.floor_to_cadence(datetime(2024, 1, 15, 12, 47, 13)) == datetime(
+            2024, 1, 15, 12, 0
+        )
 
     def test_floor_ten_minutes(self):
         cfg = OperationalConfig(cadence_minutes=10)
-        assert cfg.floor_to_cadence(
-            datetime(2024, 1, 15, 12, 47, 13)
-        ) == datetime(2024, 1, 15, 12, 40)
+        assert cfg.floor_to_cadence(datetime(2024, 1, 15, 12, 47, 13)) == datetime(
+            2024, 1, 15, 12, 40
+        )
 
     def test_floor_is_idempotent(self):
         cfg = OperationalConfig(cadence_minutes=30)
@@ -215,21 +210,18 @@ class TestTimestamps:
 
     def test_timestamps_inclusive_range(self):
         cfg = OperationalConfig(cadence_minutes=60)
-        stamps = list(cfg.timestamps(datetime(2024, 1, 15, 0),
-                                     datetime(2024, 1, 15, 3)))
+        stamps = list(cfg.timestamps(datetime(2024, 1, 15, 0), datetime(2024, 1, 15, 3)))
         assert stamps == [datetime(2024, 1, 15, h) for h in range(4)]
 
     def test_timestamps_skip_partial_leading_slot(self):
         cfg = OperationalConfig(cadence_minutes=60)
-        stamps = list(cfg.timestamps(datetime(2024, 1, 15, 0, 30),
-                                     datetime(2024, 1, 15, 2, 15)))
+        stamps = list(cfg.timestamps(datetime(2024, 1, 15, 0, 30), datetime(2024, 1, 15, 2, 15)))
         assert stamps == [datetime(2024, 1, 15, 1), datetime(2024, 1, 15, 2)]
 
     def test_grid_is_continuous_across_midnight(self):
         """A cadence that does not divide a day must not re-anchor at 00:00."""
         cfg = OperationalConfig(cadence_minutes=50)
-        stamps = list(cfg.timestamps(datetime(2024, 1, 15, 22, 0),
-                                     datetime(2024, 1, 16, 1, 0)))
+        stamps = list(cfg.timestamps(datetime(2024, 1, 15, 22, 0), datetime(2024, 1, 16, 1, 0)))
         # Every slot the enumerator yields must also be a fixed point of
         # the flooring the sensor uses, on both sides of midnight.
         assert stamps
@@ -249,34 +241,28 @@ class TestTimestamps:
 
     def test_timestamps_empty_when_reversed(self):
         cfg = OperationalConfig()
-        assert list(cfg.timestamps(datetime(2024, 1, 16),
-                                   datetime(2024, 1, 15))) == []
+        assert list(cfg.timestamps(datetime(2024, 1, 16), datetime(2024, 1, 15))) == []
 
 
 class TestPaths:
     """Derived output paths."""
 
     def test_timestamp_key(self):
-        assert OperationalConfig.timestamp_key(
-            datetime(2024, 1, 15, 12, 0)
-        ) == "20240115T120000"
+        assert OperationalConfig.timestamp_key(datetime(2024, 1, 15, 12, 0)) == "20240115T120000"
 
     def test_satellite_and_mosaic_paths(self, tmp_path):
         cfg = OperationalConfig(output_dir=tmp_path / "op")
         t0 = datetime(2024, 1, 15, 12, 0)
         sat = cfg.satellite_path("goes19", t0)
         mosaic = cfg.mosaic_path(t0)
-        assert sat == tmp_path / "op" / "20240115T120000" / \
-            "amv_goes19_20240115T120000.nc"
-        assert mosaic == tmp_path / "op" / "20240115T120000" / \
-            "mosaic_20240115T120000.nc"
+        assert sat == tmp_path / "op" / "20240115T120000" / "amv_goes19_20240115T120000.nc"
+        assert mosaic == tmp_path / "op" / "20240115T120000" / "mosaic_20240115T120000.nc"
         assert sat.parent == mosaic.parent
 
     def test_satellite_paths_differ_per_satellite(self):
         cfg = OperationalConfig()
         t0 = datetime(2024, 1, 15, 12, 0)
-        assert cfg.satellite_path("goes19", t0) != \
-            cfg.satellite_path("gk2a", t0)
+        assert cfg.satellite_path("goes19", t0) != cfg.satellite_path("gk2a", t0)
 
 
 class TestFromEnv:
@@ -315,9 +301,7 @@ class TestFromEnv:
         assert cfg.device == "cpu"
 
     def test_overrides_beat_environment(self):
-        cfg = OperationalConfig.from_env(
-            env={ENV_PREFIX + "DEVICE": "cuda"}, device="cpu"
-        )
+        cfg = OperationalConfig.from_env(env={ENV_PREFIX + "DEVICE": "cuda"}, device="cpu")
         assert cfg.device == "cpu"
 
     def test_reads_os_environ_by_default(self, monkeypatch):
@@ -329,8 +313,7 @@ class TestOpConfigFixture:
     """The shared fixtures keep everything under ``tmp_path``."""
 
     def test_paths_are_under_tmp_path(self, op_config, tmp_path):
-        assert tmp_path in op_config.output_dir.parents or \
-            op_config.output_dir.parent == tmp_path
+        assert tmp_path in op_config.output_dir.parents or op_config.output_dir.parent == tmp_path
         assert str(tmp_path) in op_config.store_uri
         assert op_config.store_is_s3 is False
 
@@ -346,8 +329,13 @@ class TestSyntheticScene:
         ds = synthetic_scene("goes19", datetime(2024, 1, 15, 12, 0))
         assert list(ds.data_vars) == AMV_VARS
         assert AMV_VARS == [
-            "u_wind", "v_wind", "cloud_top_height",
-            "quality_flag", "sigma_u", "sigma_v", "sigma_h",
+            "u_wind",
+            "v_wind",
+            "cloud_top_height",
+            "quality_flag",
+            "sigma_u",
+            "sigma_v",
+            "sigma_h",
         ]
         for name in AMV_VARS:
             assert ds[name].dims == ("y", "x")
@@ -357,19 +345,22 @@ class TestSyntheticScene:
     def test_matches_upstream_output_vars(self):
         """The variable list is the one ``infer_satellite`` writes."""
         upstream = [
-            "u_wind", "v_wind", "cloud_top_height",
-            "quality_flag", "sigma_u", "sigma_v", "sigma_h",
+            "u_wind",
+            "v_wind",
+            "cloud_top_height",
+            "quality_flag",
+            "sigma_u",
+            "sigma_v",
+            "sigma_h",
         ]
         assert AMV_VARS == upstream
 
     def test_shape(self):
-        ds = synthetic_scene("gk2a", datetime(2024, 1, 15, 12, 0),
-                             ny=8, nx=12)
+        ds = synthetic_scene("gk2a", datetime(2024, 1, 15, 12, 0), ny=8, nx=12)
         assert ds.sizes == {"y": 8, "x": 12}
 
     def test_coords(self):
-        ds = synthetic_scene("himawari9", datetime(2024, 1, 15, 12, 0),
-                             ny=16, nx=16)
+        ds = synthetic_scene("himawari9", datetime(2024, 1, 15, 12, 0), ny=16, nx=16)
         for coord in ("latitude", "longitude", "zenith_angle"):
             assert ds[coord].dims == ("y", "x")
             assert ds[coord].shape == (16, 16)
@@ -390,8 +381,7 @@ class TestSyntheticScene:
         assert ds.attrs["source"] == "student_amv"
 
     def test_zenith_is_constant_and_configurable(self):
-        ds = synthetic_scene("goes19", datetime(2024, 1, 15, 12, 0),
-                             zenith=42.5)
+        ds = synthetic_scene("goes19", datetime(2024, 1, 15, 12, 0), zenith=42.5)
         assert np.all(ds["zenith_angle"].values == np.float32(42.5))
 
     def test_default_zenith(self):
@@ -414,13 +404,11 @@ class TestSyntheticScene:
         assert not np.allclose(a["longitude"].values, b["longitude"].values)
 
     def test_unknown_satellite_centred_on_prime_meridian(self):
-        ds = synthetic_scene("not-a-satellite", datetime(2024, 1, 15, 12, 0),
-                             ny=4, nx=4)
+        ds = synthetic_scene("not-a-satellite", datetime(2024, 1, 15, 12, 0), ny=4, nx=4)
         assert ds.attrs["satellite_id"] == "not-a-satellite"
         assert abs(float(ds["longitude"].values.mean())) < 1e-3
 
     @pytest.mark.parametrize("ny,nx", [(0, 4), (4, 0), (-1, 4)])
     def test_rejects_empty_grid(self, ny, nx):
         with pytest.raises(ValueError):
-            synthetic_scene("goes19", datetime(2024, 1, 15, 12, 0),
-                            ny=ny, nx=nx)
+            synthetic_scene("goes19", datetime(2024, 1, 15, 12, 0), ny=ny, nx=nx)

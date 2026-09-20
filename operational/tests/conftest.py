@@ -54,7 +54,14 @@ HALF_WIDTH_DEG = _HALF_SPAN_DEG
 
 #: Stand-in for the band set the student model is fed.
 SYNTHETIC_BANDS = [
-    "C07", "C08", "C09", "C10", "C11", "C13", "C14", "C15",
+    "C07",
+    "C08",
+    "C09",
+    "C10",
+    "C11",
+    "C13",
+    "C14",
+    "C15",
 ]
 
 
@@ -76,8 +83,10 @@ def synthetic_quality_attrs(bands_missing: tuple[str, ...] = ()) -> dict:
     if not absent:
         note = "all requested bands available"
     else:
-        note = (f"{len(absent)} of {len(requested)} requested bands were "
-                f"unavailable and zero-filled: {', '.join(absent)}")
+        note = (
+            f"{len(absent)} of {len(requested)} requested bands were "
+            f"unavailable and zero-filled: {', '.join(absent)}"
+        )
         if degraded:
             note = "DEGRADED QUALITY - " + note
     return {
@@ -120,25 +129,6 @@ def synthetic_scene(
     / ``zenith_angle`` coordinates, and the attributes the mosaic step
     reads.  Values are smooth, finite and deterministic for a given
     ``sat_id``, so tests can assert on them.
-
-    Parameters
-    ----------
-    sat_id
-        Satellite id; sets the ``satellite_id`` attribute and the
-        longitude the footprint is centred on.
-    t0
-        Scene timestamp, written to the ``time`` attribute as a string.
-    ny, nx
-        Grid shape (rows, columns); default 64x64.
-    zenith
-        Constant satellite zenith angle, in degrees, filled across the
-        scene.  Mosaicking keeps the lowest-zenith contributor, so tests
-        control the winner by varying this.
-
-    Returns
-    -------
-    xarray.Dataset
-        Synthetic AMV scene with ``quality_flag`` set to 2.0 everywhere.
     """
     if ny <= 0 or nx <= 0:
         raise ValueError(f"ny and nx must be positive, got ({ny}, {nx})")
@@ -147,10 +137,10 @@ def synthetic_scene(
     # By default the footprint sits on the satellite's sub-point, so
     # scenes land where the real ones would.  An explicit range lets a
     # test place two scenes in a chosen overlap instead.
-    lat_lo, lat_hi = lat_range if lat_range is not None else (
-        -_HALF_SPAN_DEG, _HALF_SPAN_DEG)
-    lon_lo, lon_hi = lon_range if lon_range is not None else (
-        sub_lon - _HALF_SPAN_DEG, sub_lon + _HALF_SPAN_DEG)
+    lat_lo, lat_hi = lat_range if lat_range is not None else (-_HALF_SPAN_DEG, _HALF_SPAN_DEG)
+    lon_lo, lon_hi = (
+        lon_range if lon_range is not None else (sub_lon - _HALF_SPAN_DEG, sub_lon + _HALF_SPAN_DEG)
+    )
     lat_1d = np.linspace(lat_lo, lat_hi, ny, dtype=np.float64)
     lon_1d = np.linspace(lon_lo, lon_hi, nx, dtype=np.float64)
     lon_2d, lat_2d = np.meshgrid(lon_1d, lat_1d)
@@ -190,8 +180,7 @@ def synthetic_scene(
             "satellite_id": sat_id,
             "time": str(t0),
             "source": "student_amv",
-            **(synthetic_quality_attrs(bands_missing)
-               if bands_missing else {}),
+            **(synthetic_quality_attrs(bands_missing) if bands_missing else {}),
         },
     )
 
