@@ -63,7 +63,9 @@ def _to_datetimes(times: np.ndarray) -> list[datetime]:
 
 
 def _nearest_scan(
-    scan_times: np.ndarray, targets: np.ndarray, tol: np.timedelta64,
+    scan_times: np.ndarray,
+    targets: np.ndarray,
+    tol: np.timedelta64,
 ) -> np.ndarray:
     """Index of the nearest scan to each target, or ``-1`` if none is close.
 
@@ -72,21 +74,6 @@ def _nearest_scan(
     readers each pick a nearest scan independently, so a tie is a frame
     whose identity cannot be predicted here — and two frames breaking the
     tie in opposite directions load the same scan twice.
-
-    Parameters
-    ----------
-    scan_times : ndarray of datetime64[ns]
-        Sorted scan times.
-    targets : ndarray of datetime64[ns]
-        Times to match.
-    tol : timedelta64
-        Matching tolerance.
-
-    Returns
-    -------
-    ndarray of int
-        Same shape as ``targets``; ``-1`` where no scan is within ``tol``
-        or the nearest scan is ambiguous.
     """
     if scan_times.size == 0 or targets.size == 0:
         return np.full(targets.shape, -1, dtype=np.int64)
@@ -109,25 +96,7 @@ def _nearest_scan(
 # raise and a generated ``__hash__`` unusable.
 @dataclass(frozen=True, eq=False)
 class SatelliteAvailability:
-    """What one satellite can deliver over a window.
-
-    Attributes
-    ----------
-    sat_id : str
-        Satellite identifier, e.g. ``"goes19"``.
-    band : str or None
-        Band the scan schedule was probed on, or ``None`` when the
-        satellite carries none of the requested bands.  ``None`` means
-        "nothing available" — it is never an error.
-    scan_times : ndarray of datetime64[ns]
-        Scan times found over the (widened) window.  Coerced to
-        ``datetime64[ns]`` and sorted on construction, since the frame
-        matching is a binary search.  Empty when ``band`` is ``None``.
-    scan_interval_minutes : int
-        Full-disk repeat cycle, i.e. the triplet spacing ``dt``.
-    tolerance_minutes : float
-        How far a scan may sit from a requested frame and still count.
-    """
+    """What one satellite can deliver over a window."""
 
     sat_id: str
     band: str | None
@@ -161,32 +130,21 @@ class SatelliteAvailability:
         two frames with the same scan — the readers then snap both to it
         and the student sees a duplicated frame, i.e. near-zero
         displacement, rather than a failure.
-
-        Parameters
-        ----------
-        candidates : sequence of datetime
-            Timestamps to test.
-
-        Returns
-        -------
-        list of datetime
-            Those candidates the satellite can retrieve winds for, in the
-            order given.  Empty when the satellite carries no requested
-            band.
         """
         if not candidates or not self.has_band:
             return []
         targets = _to_datetime64(candidates)
         tol = np.timedelta64(int(round(self.tolerance_minutes * 60e9)), "ns")
         step = np.timedelta64(self.scan_interval_minutes, "m").astype("timedelta64[ns]")
-        matched = np.stack([
-            _nearest_scan(self.scan_times, frame, tol)
-            for frame in (targets - step, targets, targets + step)
-        ])  # (3, n_candidates)
+        matched = np.stack(
+            [
+                _nearest_scan(self.scan_times, frame, tol)
+                for frame in (targets - step, targets, targets + step)
+            ]
+        )  # (3, n_candidates)
         ok = np.all(matched >= 0, axis=0)
         # Three frames, three different scans.
-        ok &= (matched[0] != matched[1]) & (matched[1] != matched[2]) \
-            & (matched[0] != matched[2])
+        ok &= (matched[0] != matched[1]) & (matched[1] != matched[2]) & (matched[0] != matched[2])
         return [t for t, keep in zip(candidates, ok.tolist()) if keep]
 
     def can_deliver(self, timestamp: datetime) -> bool:
@@ -208,28 +166,6 @@ def probe_satellite(
 
     The window is widened by ``dt + tolerance`` on both sides so the
     neighbour frames of the first and last candidate are covered.
-
-    Parameters
-    ----------
-    sat_id : str
-        Satellite identifier.
-    start, end : datetime
-        Inclusive bounds of the *candidate timestamps* of interest.
-    flow_bands, rad_bands : sequence of str
-        Requested bands; the first one the satellite carries is used to
-        probe the schedule.
-    tolerance_minutes : float, optional
-        Frame-matching tolerance, minutes.
-    product : str, optional
-        GOES product passed to the upstream S3 listing.
-    include_s3_fallback : bool, optional
-        Whether public-S3 L1b counts alongside the icechunk stores.
-
-    Returns
-    -------
-    SatelliteAvailability
-        With ``band=None`` and no scan times when the satellite carries
-        none of the requested bands.
     """
     from operational.adapters import ring
 
@@ -241,22 +177,32 @@ def probe_satellite(
         logger.warning(
             "%s carries none of the requested bands (flow=%s, rad=%s); "
             "treating as nothing available",
-            sat_id, list(flow_bands), list(rad_bands),
+            sat_id,
+            list(flow_bands),
+            list(rad_bands),
         )
         return SatelliteAvailability(
-            sat_id=sat_id, band=None, scan_times=_EMPTY_TIMES,
+            sat_id=sat_id,
+            band=None,
+            scan_times=_EMPTY_TIMES,
             scan_interval_minutes=dt_minutes,
             tolerance_minutes=tolerance_minutes,
         )
 
     pad = timedelta(minutes=dt_minutes + tolerance_minutes)
     times = ring.satellite_available_times(
-        sat_id, band, start - pad, end + pad, product, include_s3_fallback,
+        sat_id,
+        band,
+        start - pad,
+        end + pad,
+        product,
+        include_s3_fallback,
     )
-    logger.debug("%s: scans on band %s over %s .. %s",
-                 sat_id, band, start - pad, end + pad)
+    logger.debug("%s: scans on band %s over %s .. %s", sat_id, band, start - pad, end + pad)
     return SatelliteAvailability(
-        sat_id=sat_id, band=band, scan_times=times,
+        sat_id=sat_id,
+        band=band,
+        scan_times=times,
         scan_interval_minutes=dt_minutes,
         tolerance_minutes=tolerance_minutes,
     )
@@ -277,65 +223,38 @@ def available_timestamps(
     Candidates are the satellite's own scan times inside ``[start, end]``;
     each survives only if the satellite also has the ``t - dt`` and
     ``t + dt`` frames within ``tolerance_minutes``.
-
-    Parameters
-    ----------
-    sat_id : str
-        Satellite identifier.
-    start, end : datetime
-        Inclusive window bounds.
-    flow_bands, rad_bands : sequence of str
-        Requested bands.
-    tolerance_minutes : float, optional
-        Frame-matching tolerance, minutes.
-    product : str, optional
-        GOES product passed to the upstream S3 listing.
-    include_s3_fallback : bool, optional
-        Whether public-S3 L1b counts alongside the icechunk stores.
-
-    Returns
-    -------
-    list of datetime
-        Sorted, ascending.  Empty when the satellite carries none of the
-        requested bands or has no complete triplet in the window.
     """
     start = _naive_utc(start)
     end = _naive_utc(end)
     if end < start:
         return []
     avail = probe_satellite(
-        sat_id, start, end, flow_bands, rad_bands,
-        tolerance_minutes, product, include_s3_fallback,
+        sat_id,
+        start,
+        end,
+        flow_bands,
+        rad_bands,
+        tolerance_minutes,
+        product,
+        include_s3_fallback,
     )
     if not avail.has_band:
         return []
     lo = np.datetime64(start, "ns")
     hi = np.datetime64(end, "ns")
-    in_window = avail.scan_times[
-        (avail.scan_times >= lo) & (avail.scan_times <= hi)
-    ]
+    in_window = avail.scan_times[(avail.scan_times >= lo) & (avail.scan_times <= hi)]
     return avail.deliverable(_to_datetimes(in_window))
 
 
 def cadence_grid(
-    start: datetime, end: datetime, cadence_minutes: int,
+    start: datetime,
+    end: datetime,
+    cadence_minutes: int,
 ) -> list[datetime]:
     """Grid slots within ``[start, end]``, anchored on the Unix epoch.
 
     Anchoring means a 60-minute cadence always lands on the hour,
     independent of where the window happens to begin.
-
-    Parameters
-    ----------
-    start, end : datetime
-        Inclusive bounds.
-    cadence_minutes : int
-        Slot spacing, minutes; must be positive.
-
-    Returns
-    -------
-    list of datetime
-        Ascending grid slots.
     """
     if cadence_minutes <= 0:
         raise ValueError(f"cadence_minutes must be positive, got {cadence_minutes}")
@@ -370,38 +289,6 @@ def new_timestamps(
 
     This is the sensor poll: hand it the last timestamp already
     processed and it returns the work that has become possible since.
-
-    Parameters
-    ----------
-    sat_id : str
-        Satellite identifier.
-    since : datetime or None
-        Last timestamp already handled; slots at or before it are
-        skipped.  ``None`` means "everything in the window", the window
-        then reaching back ``lookback_hours`` from ``until``.
-    until : datetime
-        Upper bound (inclusive) on the slots considered.
-    flow_bands, rad_bands : sequence of str
-        Requested bands.
-    cadence_minutes : int, optional
-        Operational grid spacing, minutes.
-    tolerance_minutes : float, optional
-        Frame-matching tolerance, minutes.
-    lookback_hours : float, optional
-        Hard cap on how far back the window reaches from ``until``.  It
-        is the window depth when ``since`` is ``None``, and the catch-up
-        limit when ``since`` is old: a stale cursor otherwise makes one
-        poll list days of S3 and time the caller out, so the cursor never
-        advances.  Skipped slots are logged.
-    product : str, optional
-        GOES product passed to the upstream S3 listing.
-    include_s3_fallback : bool, optional
-        Whether public-S3 L1b counts alongside the icechunk stores.
-
-    Returns
-    -------
-    list of datetime
-        Ascending; empty when nothing new is deliverable.
     """
     until = _naive_utc(until)
     horizon = until - timedelta(hours=lookback_hours)
@@ -414,23 +301,31 @@ def new_timestamps(
         window_start = max(since, horizon)
         if window_start > since:
             logger.warning(
-                "%s: cursor %s is older than the %.1f h catch-up limit; "
-                "skipping ahead to %s",
-                sat_id, since, lookback_hours, window_start,
+                "%s: cursor %s is older than the %.1f h catch-up limit; " "skipping ahead to %s",
+                sat_id,
+                since,
+                lookback_hours,
+                window_start,
             )
     candidates = [
-        t for t in cadence_grid(window_start, until, cadence_minutes)
-        if since is None or t > since
+        t for t in cadence_grid(window_start, until, cadence_minutes) if since is None or t > since
     ]
     if not candidates:
         return []
     avail = probe_satellite(
-        sat_id, candidates[0], candidates[-1], flow_bands, rad_bands,
-        tolerance_minutes, product, include_s3_fallback,
+        sat_id,
+        candidates[0],
+        candidates[-1],
+        flow_bands,
+        rad_bands,
+        tolerance_minutes,
+        product,
+        include_s3_fallback,
     )
     ready = avail.deliverable(candidates)
-    logger.info("%s: %d of %d cadence slot(s) ready after %s",
-                sat_id, len(ready), len(candidates), since)
+    logger.info(
+        "%s: %d of %d cadence slot(s) ready after %s", sat_id, len(ready), len(candidates), since
+    )
     return ready
 
 
@@ -443,38 +338,24 @@ def ready_satellites(
     product: str = DEFAULT_PRODUCT,
     include_s3_fallback: bool = True,
 ) -> dict[str, bool]:
-    """Which satellites can deliver a retrieval at ``timestamp``.
-
-    Parameters
-    ----------
-    timestamp : datetime
-        Slot to test.
-    satellites : sequence of str
-        Satellite identifiers.
-    flow_bands, rad_bands : sequence of str
-        Requested bands.
-    tolerance_minutes : float, optional
-        Frame-matching tolerance, minutes.
-    product : str, optional
-        GOES product passed to the upstream S3 listing.
-    include_s3_fallback : bool, optional
-        Whether public-S3 L1b counts alongside the icechunk stores.
-
-    Returns
-    -------
-    dict
-        ``{sat_id: bool}`` in the order given, one entry per satellite.
-        A satellite carrying none of the requested bands maps to
-        ``False``.
-    """
+    """Which satellites can deliver a retrieval at ``timestamp``."""
     timestamp = _naive_utc(timestamp)
     ready: dict[str, bool] = {}
     for sat_id in satellites:
         avail = probe_satellite(
-            sat_id, timestamp, timestamp, flow_bands, rad_bands,
-            tolerance_minutes, product, include_s3_fallback,
+            sat_id,
+            timestamp,
+            timestamp,
+            flow_bands,
+            rad_bands,
+            tolerance_minutes,
+            product,
+            include_s3_fallback,
         )
         ready[sat_id] = avail.can_deliver(timestamp)
-    logger.info("Ready at %s: %s", timestamp,
-                ", ".join(f"{k}={'y' if v else 'n'}" for k, v in ready.items()))
+    logger.info(
+        "Ready at %s: %s",
+        timestamp,
+        ", ".join(f"{k}={'y' if v else 'n'}" for k, v in ready.items()),
+    )
     return ready
