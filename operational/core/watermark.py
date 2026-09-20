@@ -25,19 +25,7 @@ __all__ = ["WatermarkStore"]
 
 
 def _to_naive_utc(t: datetime) -> datetime:
-    """Return ``t`` as a naive UTC datetime.
-
-    Parameters
-    ----------
-    t
-        Timestamp, timezone-aware or naive.  Naive values are assumed to
-        already be UTC, matching the rest of the codebase.
-
-    Returns
-    -------
-    datetime
-        Equivalent naive UTC timestamp.
-    """
+    """Return ``t`` as a naive UTC datetime."""
     if t.tzinfo is not None:
         return t.astimezone(timezone.utc).replace(tzinfo=None)
     return t
@@ -45,12 +33,6 @@ def _to_naive_utc(t: datetime) -> datetime:
 
 class WatermarkStore:
     """JSON-backed, monotonic, per-satellite timestamp watermarks.
-
-    Parameters
-    ----------
-    path
-        Path of the JSON state file.  Neither the file nor its parent
-        directory need to exist; the directory is created on the first write.
 
     Notes
     -----
@@ -77,15 +59,7 @@ class WatermarkStore:
     # persistence
     # ------------------------------------------------------------------
     def _load(self) -> dict[str, datetime]:
-        """Read the state file, tolerating absence and corruption.
-
-        Returns
-        -------
-        dict
-            Mapping of satellite id to naive UTC timestamp.  Entries that
-            cannot be parsed are dropped; an unreadable or structurally
-            invalid file yields an empty mapping.
-        """
+        """Read the state file, tolerating absence and corruption."""
         try:
             raw = self._path.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -154,9 +128,7 @@ class WatermarkStore:
         directory = self._path.parent
         directory.mkdir(parents=True, exist_ok=True)
 
-        fd, tmp_name = tempfile.mkstemp(
-            dir=directory, prefix=f"{self._path.name}.", suffix=".tmp"
-        )
+        fd, tmp_name = tempfile.mkstemp(dir=directory, prefix=f"{self._path.name}.", suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, indent=2, sort_keys=True)
@@ -175,18 +147,7 @@ class WatermarkStore:
     # public API
     # ------------------------------------------------------------------
     def get(self, sat_id: str) -> datetime | None:
-        """Return the last emitted timestamp for ``sat_id``.
-
-        Parameters
-        ----------
-        sat_id
-            Satellite identifier.
-
-        Returns
-        -------
-        datetime or None
-            The watermark, or ``None`` if nothing was ever emitted.
-        """
+        """Return the last emitted timestamp for ``sat_id``."""
         with self._lock:
             return self._state.get(sat_id)
 
@@ -195,38 +156,11 @@ class WatermarkStore:
 
         A value at or before the current watermark is ignored, so the
         watermark never moves backwards.
-
-        Parameters
-        ----------
-        sat_id
-            Satellite identifier.
-        t
-            Candidate timestamp (naive values are treated as UTC).
         """
         self.advance(sat_id, t)
 
     def advance(self, sat_id: str, t: datetime) -> bool:
-        """Move the watermark forward and report whether it actually moved.
-
-        Parameters
-        ----------
-        sat_id
-            Satellite identifier.
-        t
-            Candidate timestamp (naive values are treated as UTC).
-
-        Returns
-        -------
-        bool
-            ``True`` if the stored watermark changed and the state file was
-            rewritten, ``False`` if ``t`` was not newer than the current one.
-
-        Raises
-        ------
-        TypeError
-            If ``sat_id`` is not a string or ``t`` is not a
-            :class:`~datetime.datetime`.
-        """
+        """Move the watermark forward and report whether it actually moved."""
         if not isinstance(sat_id, str):
             raise TypeError(f"sat_id must be a str, got {type(sat_id).__name__}")
         if not isinstance(t, datetime):
@@ -257,24 +191,12 @@ class WatermarkStore:
             return True
 
     def all(self) -> dict[str, datetime]:
-        """Return a copy of every known watermark.
-
-        Returns
-        -------
-        dict
-            Mapping of satellite id to naive UTC timestamp.
-        """
+        """Return a copy of every known watermark."""
         with self._lock:
             return dict(self._state)
 
     def reset(self, sat_id: str | None = None) -> None:
         """Forget one satellite's watermark, or every watermark.
-
-        Parameters
-        ----------
-        sat_id
-            Satellite to forget.  ``None`` (the default) clears the whole
-            store.
 
         Notes
         -----

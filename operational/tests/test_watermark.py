@@ -327,9 +327,7 @@ class TestReset:
         assert store.all() == {}
         assert WatermarkStore(path).all() == {}
 
-    def test_reset_unknown_satellite_leaves_others_intact(
-        self, tmp_path: Path
-    ) -> None:
+    def test_reset_unknown_satellite_leaves_others_intact(self, tmp_path: Path) -> None:
         path = tmp_path / "wm.json"
         store = WatermarkStore(path)
         store.set("goes18", T0)
@@ -339,11 +337,7 @@ class TestReset:
 
     def test_reset_clears_an_unparseable_on_disk_entry(self, tmp_path: Path) -> None:
         path = tmp_path / "wm.json"
-        path.write_text(
-            json.dumps(
-                {"goes18": "not-a-timestamp", "goes19": "2026-08-01T00:00:00"}
-            )
-        )
+        path.write_text(json.dumps({"goes18": "not-a-timestamp", "goes19": "2026-08-01T00:00:00"}))
         store = WatermarkStore(path)
         store.reset("goes18")
         assert json.loads(path.read_text()) == {"goes19": "2026-08-01T00:00:00"}
@@ -378,15 +372,12 @@ class TestConcurrency:
             start.wait()
             local: list[bool] = []
             for i in range(per_thread):
-                local.append(
-                    store.advance("goes18", T0 + timedelta(minutes=offset + i))
-                )
+                local.append(store.advance("goes18", T0 + timedelta(minutes=offset + i)))
             with moved_lock:
                 moved.extend(local)
 
         threads = [
-            threading.Thread(target=worker, args=(i * per_thread,))
-            for i in range(n_threads)
+            threading.Thread(target=worker, args=(i * per_thread,)) for i in range(n_threads)
         ]
         for thread in threads:
             thread.start()
@@ -412,17 +403,12 @@ class TestConcurrency:
             for i in range(20):
                 store.advance(sat_id, T0 + timedelta(minutes=i, hours=index))
 
-        threads = [
-            threading.Thread(target=worker, args=(sat, i))
-            for i, sat in enumerate(sats)
-        ]
+        threads = [threading.Thread(target=worker, args=(sat, i)) for i, sat in enumerate(sats)]
         for thread in threads:
             thread.start()
         for thread in threads:
             thread.join()
 
-        expected = {
-            sat: T0 + timedelta(minutes=19, hours=i) for i, sat in enumerate(sats)
-        }
+        expected = {sat: T0 + timedelta(minutes=19, hours=i) for i, sat in enumerate(sats)}
         assert store.all() == expected
         assert WatermarkStore(path).all() == expected
