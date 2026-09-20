@@ -550,3 +550,57 @@ class TestSensorDefinition:
         sensor_def = build_availability_sensor(config=sensor_config, now_fn=lambda: NOW)
 
         assert str(override.resolve()) in (sensor_def.description or "")
+
+
+class TestSparselyCoveredSatellites:
+    """The ring is not the same thing as what a run waits for."""
+
+    @staticmethod
+    def _config(tmp_path):
+        return OperationalConfig(
+            satellites=("goes18", "goes19", "mtg-i1"),
+            required_satellites=("goes18", "goes19"),
+            output_dir=tmp_path / "out",
+            cadence_minutes=60,
+        )
+
+    def test_a_timestamp_is_emitted_although_mtg_has_nothing(
+        self, monkeypatch, tmp_path, wm_path
+    ):
+        """MTG and IODC have assets but must not hold up a timestamp."""
+        stub = StubAvailability({
+            "goes18": [_hours_ago(1)],
+            "goes19": [_hours_ago(1)],
+            "mtg-i1": [],
+        })
+        monkeypatch.setattr(availability_mod, "new_timestamps", stub)
+
+        results, _ = evaluate(make_sensor(self._config(tmp_path), wm_path))
+        requests = run_requests(results)
+
+        assert [r.partition_key for r in requests] == ["2026-01-02-11:00"]
+        assert requests[0].tags["operational/satellites"] == "goes18,goes19"
+
+    def test_mtg_is_never_even_asked(self, monkeypatch, tmp_path, wm_path):
+        """No point polling an archive whose answer cannot change the outcome."""
+        stub = StubAvailability({
+            "goes18": [_hours_ago(1)],
+            "goes19": [_hours_ago(1)],
+            "mtg-i1": [],
+        })
+        monkeypatch.setattr(availability_mod, "new_timestamps", stub)
+        evaluate(make_sensor(self._config(tmp_path), wm_path))
+        assert stub.calls_for("mtg-i1") == []
+
+    def test_a_required_satellite_still_holds_the_timestamp_back(
+        self, monkeypatch, tmp_path, wm_path
+    ):
+        stub = StubAvailability({
+            "goes18": [_hours_ago(1)],
+            "goes19": [],
+            "mtg-i1": [_hours_ago(1)],
+        })
+        monkeypatch.setattr(availability_mod, "new_timestamps", stub)
+
+        results, _ = evaluate(make_sensor(self._config(tmp_path), wm_path))
+        assert run_requests(results) == []

@@ -464,7 +464,16 @@ def build_availability_sensor(
         raise ValueError("OperationalConfig.cadence_minutes must be positive")
     wm_path = _resolve_watermark_path(watermark_path, cfg)
     clock = now_fn or _utcnow
-    satellites = tuple(cfg.satellites)
+    # The satellites a timestamp is judged on, which is not necessarily
+    # the whole ring: the icechunk-only satellites get their own assets
+    # but are too sparsely covered to hold up a run, and the mosaic
+    # already tolerates one being absent.
+    satellites = tuple(cfg.required_satellites or cfg.satellites)
+    if set(satellites) != set(cfg.satellites):
+        logger.info(
+            "Waiting on %s; %s will be mosaicked when present but not "
+            "waited for", ", ".join(satellites),
+            ", ".join(sorted(set(cfg.satellites) - set(satellites))))
     rule = "all" if require_all else "any"
 
     description = (
