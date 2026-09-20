@@ -373,5 +373,9 @@ class TestEndToEnd:
 
         ds = read_store(tmp_store_uri)
         assert ds.sizes["time"] == 1
+        # "satellites" stays a group attribute -- it is the store-wide
+        # vocabulary.  The quality of one cycle is a variable on the
+        # time axis, so a later clean cycle cannot overwrite it.
         assert ds.attrs["satellites"] == "goes19"
-        assert int(ds.attrs["quality_degraded"]) == 1
+        assert int(ds["quality_degraded"].values[0]) == 1
+        assert str(ds["satellites_contributing"].values[0]) == "goes19"
