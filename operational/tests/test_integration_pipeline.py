@@ -327,12 +327,36 @@ class TestFullPipeline:
                 assert names[int(cell["source_satellite_index"])] == "gk2a"
 
     def test_quality_attributes_reach_the_store(self, pipeline_run):
-        """A degraded contributor is still flagged after publication."""
+        """A degraded contributor is still flagged after publication.
+
+        Quality rides on the time axis rather than on the group, so
+        every timestep keeps its own: as group attributes these were
+        rewritten by each append, and the whole series ended up
+        described by whichever mosaic happened to be published last.
+        """
         with _open_store(pipeline_run["store_uri"]) as ds:
-            assert int(ds.attrs["quality_degraded"]) == 1
-            note = str(ds.attrs["quality_note"])
-            assert DEGRADED_SAT in note
-            assert "DEGRADED" in note
+            assert "quality_degraded" not in ds.attrs, (
+                "quality belongs on the time axis, not the group")
+            assert ds["quality_degraded"].dims == ("time",)
+
+            for step in range(ds.sizes["time"]):
+                assert int(ds["quality_degraded"].values[step]) == 1
+                note = str(ds["quality_note"].values[step])
+                assert DEGRADED_SAT in note
+                assert "DEGRADED" in note
+
             satellites = str(ds.attrs["satellites"])
             for sat in SATELLITES:
                 assert sat in satellites
+
+    def test_each_timestep_records_the_satellites_behind_it(self, pipeline_run):
+        """What a publish needs to decide whether a resume improves on it."""
+        with _open_store(pipeline_run["store_uri"]) as ds:
+            assert ds["satellites_contributing"].dims == ("time",)
+            for step in range(ds.sizes["time"]):
+                contributing = {
+                    part for part in
+                    str(ds["satellites_contributing"].values[step]).split(",")
+                    if part
+                }
+                assert contributing == set(SATELLITES)
