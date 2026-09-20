@@ -93,33 +93,15 @@ def _selected_keys(job_def) -> set[AssetKey]:
     return set(job_def.asset_layer.executable_asset_keys)
 
 
-def _run_module_script(
-    script: str, env_overrides: dict[str, str]
-) -> subprocess.CompletedProcess:
+def _run_module_script(script: str, env_overrides: dict[str, str]) -> subprocess.CompletedProcess:
     """Import the code location in a fresh interpreter and run ``script``.
 
     A subprocess is the only honest way to test settings the asset
     modules read at *their* import: once they are in ``sys.modules``, the
     graph they built is fixed for the life of the process.
-
-    Parameters
-    ----------
-    script : str
-        Python source, dedented before execution.
-    env_overrides : dict of str
-        Environment variables layered over the current environment, which
-        is first stripped of every ``STEREO_WINDS_OP_*`` setting so a
-        stray one in the caller's shell cannot change the result.
-
-    Returns
-    -------
-    subprocess.CompletedProcess
-        With ``stdout`` and ``stderr`` captured as text.
     """
     env = {
-        name: value
-        for name, value in os.environ.items()
-        if not name.startswith("STEREO_WINDS_OP_")
+        name: value for name, value in os.environ.items() if not name.startswith("STEREO_WINDS_OP_")
     }
     env.update(env_overrides)
     inherited = os.environ.get("PYTHONPATH", "")
@@ -213,9 +195,7 @@ class TestFullJob:
     def test_accepts_a_narrower_selection(self):
         job = build_full_job(name="probe_job", selection=[AssetKey("global_mosaic")])
         probe = Definitions(assets=defs.assets, jobs=[job], resources=defs.resources)
-        assert _selected_keys(probe.resolve_job_def("probe_job")) == {
-            AssetKey("global_mosaic")
-        }
+        assert _selected_keys(probe.resolve_job_def("probe_job")) == {AssetKey("global_mosaic")}
 
 
 class TestSatelliteJobs:
@@ -232,9 +212,7 @@ class TestSatelliteJobs:
         assert _selected_keys(job_def) == {AssetKey(amv_asset_name(sat_id))}
 
     def test_can_opt_into_downstream(self):
-        job = build_satellite_job(
-            "goes18", [AssetKey("amv_goes18")], include_downstream=True
-        )
+        job = build_satellite_job("goes18", [AssetKey("amv_goes18")], include_downstream=True)
         probe = Definitions(assets=defs.assets, jobs=[job], resources=defs.resources)
         selected = _selected_keys(probe.resolve_job_def(satellite_job_name("goes18")))
         assert selected == {
@@ -300,11 +278,7 @@ class TestSatelliteJobs:
             Definitions.validate_loadable(defs)
             print(sorted(job.name for job in defs.jobs))
             """,
-            {
-                "STEREO_WINDS_OP_SATELLITES": (
-                    "goes18,goes19,mtg-i1,msg-iodc,gk2a,himawari9"
-                )
-            },
+            {"STEREO_WINDS_OP_SATELLITES": ("goes18,goes19,mtg-i1,msg-iodc,gk2a,himawari9")},
         )
         assert result.returncode == 0, result.stderr
         assert "operational_amv_mtg_i1_job" in result.stdout
@@ -326,9 +300,7 @@ class TestConcurrencyLimit:
         assert max_concurrent_from_env({}) == DEFAULT_MAX_CONCURRENT
 
     def test_blank_environment_uses_the_default(self):
-        assert max_concurrent_from_env({MAX_CONCURRENT_ENV_VAR: "  "}) == (
-            DEFAULT_MAX_CONCURRENT
-        )
+        assert max_concurrent_from_env({MAX_CONCURRENT_ENV_VAR: "  "}) == (DEFAULT_MAX_CONCURRENT)
 
     def test_environment_override_takes_effect(self):
         assert max_concurrent_from_env({MAX_CONCURRENT_ENV_VAR: "3"}) == 3
@@ -337,9 +309,7 @@ class TestConcurrencyLimit:
     def test_bad_values_fall_back_instead_of_failing_the_load(self, raw):
         # A typo in a deployment's environment must not take the whole
         # code location down.
-        assert max_concurrent_from_env({MAX_CONCURRENT_ENV_VAR: raw}) == (
-            DEFAULT_MAX_CONCURRENT
-        )
+        assert max_concurrent_from_env({MAX_CONCURRENT_ENV_VAR: raw}) == (DEFAULT_MAX_CONCURRENT)
 
     def test_reads_os_environ_by_default(self, monkeypatch):
         monkeypatch.setenv(MAX_CONCURRENT_ENV_VAR, "4")
@@ -394,12 +364,11 @@ class TestBackstopSchedule:
         partitions = build_partitions_def(datetime(2026, 1, 1), 360)
         job = build_full_job(name="probe_job")
         schedule = build_backstop_schedule(job, partitions, name="probe_schedule")
-        probe = Definitions(assets=defs.assets, jobs=[job], schedules=[schedule],
-                          resources=defs.resources)
-        # The job itself is hourly, so the boundary cron is the hourly one.
-        assert probe.resolve_schedule_def("probe_schedule").cron_schedule == (
-            "0 * * * *"
+        probe = Definitions(
+            assets=defs.assets, jobs=[job], schedules=[schedule], resources=defs.resources
         )
+        # The job itself is hourly, so the boundary cron is the hourly one.
+        assert probe.resolve_schedule_def("probe_schedule").cron_schedule == ("0 * * * *")
 
     def test_the_shipped_schedule_matches_the_shipped_partitions(self):
         # The offset gate reads the partitions it is handed, so the code
@@ -435,9 +404,7 @@ class TestBackstopSchedule:
             )
             request = schedule.evaluate_tick(context).run_requests[0]
         assert request.tags["stereo_winds/trigger"] == "backstop-schedule"
-        assert request.tags["stereo_winds/pipeline"] == RUN_TAGS[
-            "stereo_winds/pipeline"
-        ]
+        assert request.tags["stereo_winds/pipeline"] == RUN_TAGS["stereo_winds/pipeline"]
 
     def test_tick_uses_the_partition_as_its_run_key(self):
         # Which is what stops one schedule from launching the same
@@ -513,9 +480,7 @@ class TestAmvAssetResolution:
         stub = type(sys)("amv_stub")
         stub.build_amv_asset = real.build_amv_asset
         partitions = build_partitions_def(datetime(2026, 1, 1), 60)
-        resolved = resolve_amv_assets(
-            partitions, OperationalConfig(satellites=("mtg-i1",)), stub
-        )
+        resolved = resolve_amv_assets(partitions, OperationalConfig(satellites=("mtg-i1",)), stub)
         assert AssetKey("amv_mtg_i1") in resolved["mtg-i1"].keys
 
     def test_empty_prebuilt_mapping_falls_back(self):
@@ -525,9 +490,7 @@ class TestAmvAssetResolution:
         stub.AMV_ASSETS_BY_SAT = {}
         stub.build_amv_asset = real.build_amv_asset
         partitions = build_partitions_def(datetime(2026, 1, 1), 60)
-        resolved = resolve_amv_assets(
-            partitions, OperationalConfig(satellites=("goes19",)), stub
-        )
+        resolved = resolve_amv_assets(partitions, OperationalConfig(satellites=("goes19",)), stub)
         assert set(resolved) == {"goes19"}
 
 
@@ -575,9 +538,7 @@ class TestResources:
         assert resources["store"].store_uri.env_var_name == "STEREO_WINDS_OP_STORE_URI"
         assert resources["model"].student_ckpt.env_var_name == CHECKPOINT_ENV_VAR
         assert resources["model"].device.env_var_name == "STEREO_WINDS_OP_DEVICE"
-        assert resources["paths"].output_dir.env_var_name == (
-            "STEREO_WINDS_OP_OUTPUT_DIR"
-        )
+        assert resources["paths"].output_dir.env_var_name == ("STEREO_WINDS_OP_OUTPUT_DIR")
 
     def test_env_var_resolves_to_the_real_value(self, monkeypatch):
         monkeypatch.setenv("STEREO_WINDS_OP_STORE_URI", "s3://bucket/prefix")
@@ -671,17 +632,13 @@ class TestEnvironmentShapesTheGraph:
         # moments.
         other = 30 if BUILT_CADENCE_MINUTES != 30 else 15
         with caplog.at_level("WARNING", logger="operational.definitions"):
-            resolved = resolve_partitions_def(
-                OperationalConfig(cadence_minutes=other), env={}
-            )
+            resolved = resolve_partitions_def(OperationalConfig(cadence_minutes=other), env={})
         assert "the assets win" in caplog.text
         assert resolved == defs.resolve_all_asset_specs()[0].partitions_def
 
     def test_matching_partitions_are_quiet(self, caplog):
         with caplog.at_level("WARNING", logger="operational.definitions"):
-            resolve_partitions_def(
-                OperationalConfig(cadence_minutes=BUILT_CADENCE_MINUTES), env={}
-            )
+            resolve_partitions_def(OperationalConfig(cadence_minutes=BUILT_CADENCE_MINUTES), env={})
         assert caplog.text == ""
 
     def test_mismatched_satellites_warn(self, caplog):
@@ -694,9 +651,12 @@ class TestEnvironmentShapesTheGraph:
 
     def test_matching_satellite_list_is_quiet(self, caplog):
         with caplog.at_level("WARNING", logger="operational.definitions"):
-            assert check_mosaic_inputs(
-                AssetKey(amv_asset_name(sat_id)) for sat_id in DEFAULT_SATELLITES
-            ) == set()
+            assert (
+                check_mosaic_inputs(
+                    AssetKey(amv_asset_name(sat_id)) for sat_id in DEFAULT_SATELLITES
+                )
+                == set()
+            )
         assert caplog.text == ""
 
     def test_check_reports_the_unbuilt_inputs(self):
@@ -719,18 +679,17 @@ class TestEnvironmentShapesTheGraph:
     def test_env_is_honoured_and_not_quietly_replaced(self):
         # A passed mapping must actually be read; falling back to the
         # real os.environ would make every `env=` argument a lie.
-        assert check_satellite_agreement(
-            OperationalConfig(satellites=("goes19",)), ["goes19"]
-        ) == set()
+        assert (
+            check_satellite_agreement(OperationalConfig(satellites=("goes19",)), ["goes19"])
+            == set()
+        )
         rebuilt = build_definitions(env={"STEREO_WINDS_OP_DEVICE": "cuda"})
         assert rebuilt.resources["model"].device == "cuda"
 
     def test_max_concurrent_reaches_the_jobs(self):
         # The one setting you least want read from an unexpected place.
         rebuilt = build_definitions(env={MAX_CONCURRENT_ENV_VAR: "4"})
-        assert rebuilt.resolve_job_def(FULL_JOB_NAME).executor_def.name == (
-            "multiprocess"
-        )
+        assert rebuilt.resolve_job_def(FULL_JOB_NAME).executor_def.name == ("multiprocess")
         assert max_concurrent_from_env({MAX_CONCURRENT_ENV_VAR: "4"}) == 4
 
 
@@ -812,8 +771,7 @@ def _resources_without_checkpoints(config):
     from operational.resources import ModelResource
 
     resources = dict(default_resources(config, env={}))
-    resources["model"] = ModelResource(
-        student_ckpt="", raft_ckpt="", device="cpu")
+    resources["model"] = ModelResource(student_ckpt="", raft_ckpt="", device="cpu")
     return resources
 
 
@@ -836,15 +794,19 @@ class TestMaterializeOnePartition:
         from operational.adapters.ring import sat_nc_path
         from operational.tests.conftest import synthetic_scene
 
-        def run_satellite_amv(sat_id, t0, model, disp, flow_bands,
-                              rad_bands, output_dir, **kwargs):
+        def run_satellite_amv(sat_id, t0, model, disp, flow_bands, rad_bands, output_dir, **kwargs):
             ds = synthetic_scene(sat_id, t0, ny=32, nx=32)
             path = pathlib.Path(sat_nc_path(pathlib.Path(output_dir), sat_id, t0))
             path.parent.mkdir(parents=True, exist_ok=True)
             ds.to_netcdf(path)
             return AmvResult(
-                sat_id=sat_id, timestamp=t0, path=path, dataset=ds,
-                reused=False, n_bands_missing=0, bands_missing=(),
+                sat_id=sat_id,
+                timestamp=t0,
+                path=path,
+                dataset=ds,
+                reused=False,
+                n_bands_missing=0,
+                bands_missing=(),
                 quality_degraded=False,
             )
 
@@ -869,10 +831,7 @@ class TestMaterializeOnePartition:
             resources=_resources_without_checkpoints(config),
         )
         assert result.success
-        materialized = {
-            event.asset_key
-            for event in result.get_asset_materialization_events()
-        }
+        materialized = {event.asset_key for event in result.get_asset_materialization_events()}
         assert materialized == EXPECTED_ASSET_KEYS
 
     def test_one_satellite_materializes_on_its_own(self, tmp_path):
