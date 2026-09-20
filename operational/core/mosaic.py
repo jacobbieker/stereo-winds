@@ -52,20 +52,7 @@ def missing_satellites(
     per_sat: Mapping[str, Any] | Iterable[str],
     expected: Iterable[str],
 ) -> list[str]:
-    """Which expected satellites are not among the contributors.
-
-    Parameters
-    ----------
-    per_sat : Mapping of satellite id -> dataset (only the keys are
-        used), or any iterable of contributing satellite ids.
-    expected : Satellite ids the cycle was supposed to include.
-
-    Returns
-    -------
-    list of str
-        The expected ids that did not contribute, in the order they
-        appear in ``expected`` and without duplicates.
-    """
+    """Which expected satellites are not among the contributors."""
     contributed = set(per_sat.keys()) if isinstance(per_sat, Mapping) else set(per_sat)
     seen: set[str] = set()
     out: list[str] = []
@@ -103,52 +90,15 @@ def build_mosaic(
     dropped from ``per_sat`` once it has been gridded, which is what
     makes peak memory the accumulator plus one full disk rather than the
     accumulator plus every disk the caller is still holding.
-
-    Parameters
-    ----------
-    per_sat : Satellite id -> AMV dataset, in ``infer_satellite``'s
-        schema: dims ``(y, x)``, 2-D ``latitude`` / ``longitude`` /
-        ``zenith_angle`` coordinates, and ``quality_flag >= 2`` marking
-        the cells worth gridding.  A partial mapping is fine.
-    t0 : Nominal timestamp of the cycle.  Recorded as ``nominal_time``,
-        and used for the ``time`` attribute if no scene carried one.
-    resolution_m : Output grid spacing, in metres.
-    expected : Satellite ids the cycle was supposed to include.  Defaults
-        to the keys of ``per_sat``, which reports only satellites that
-        were handed over but won no cells; pass the full roster to have
-        satellites that never produced a dataset reported too.
-    consume : Drop each scene from ``per_sat`` after gridding it.  The
-        mapping must be mutable.  Off by default, because emptying a
-        caller's dict is not something to do unasked.
-
-    Returns
-    -------
-    xr.Dataset
-        Upstream's mosaic — dims ``(latitude, longitude)``, the output
-        variables plus ``source_satellite_index`` — with the upstream
-        attributes intact and provenance attributes added.
-
-    Raises
-    ------
-    EmptyMosaicError
-        If ``per_sat`` is empty, or if no satellite in it grids a single
-        cell: either way there is no mosaic to publish.
-    TypeError
-        If ``consume`` is set but ``per_sat`` cannot be mutated.
-    ValueError
-        If a scene is missing a field the gridder needs.
     """
     from operational.adapters.ring import GlobalMosaic
 
     if not per_sat:
         raise EmptyMosaicError(
-            f"no per-satellite retrievals available for {t0.isoformat()}: "
-            f"nothing to mosaic"
+            f"no per-satellite retrievals available for {t0.isoformat()}: " f"nothing to mosaic"
         )
     if consume and not isinstance(per_sat, MutableMapping):
-        raise TypeError(
-            f"consume=True needs a mutable mapping, got {type(per_sat).__name__}"
-        )
+        raise TypeError(f"consume=True needs a mutable mapping, got {type(per_sat).__name__}")
 
     sat_ids = list(per_sat)
     expected_ids = list(sat_ids) if expected is None else list(dict.fromkeys(expected))
@@ -167,8 +117,7 @@ def build_mosaic(
             contributed.append(sat_id)
         else:
             empty_handed.append(sat_id)
-            logger.warning("%s produced no grid cells for %s",
-                           sat_id, t0.isoformat())
+            logger.warning("%s produced no grid cells for %s", sat_id, t0.isoformat())
 
     if not contributed:
         raise EmptyMosaicError(
@@ -180,9 +129,13 @@ def build_mosaic(
 
     absent = missing_satellites(contributed, expected_ids)
     if absent:
-        logger.warning("Mosaic for %s is missing %d of %d satellites: %s",
-                       t0.isoformat(), len(absent), len(expected_ids),
-                       ", ".join(absent))
+        logger.warning(
+            "Mosaic for %s is missing %d of %d satellites: %s",
+            t0.isoformat(),
+            len(absent),
+            len(expected_ids),
+            ", ".join(absent),
+        )
 
     # Upstream takes ``time`` from the first scene's attrs; if none of
     # them carried one it is None, which no NetCDF attribute can hold.
@@ -193,17 +146,19 @@ def build_mosaic(
     # (satellites, time, resolution_m, merge_rule, quality_degraded,
     # degraded_satellites, quality_note) is disturbed.  Comma-joined
     # rather than lists so an empty value survives a NetCDF round trip.
-    ds.attrs.update({
-        "nominal_time": t0.isoformat(),
-        "satellites_expected": ",".join(expected_ids),
-        "satellites_contributing": ",".join(contributed),
-        "satellites_missing": ",".join(absent),
-        "n_satellites_expected": len(expected_ids),
-        "n_satellites_contributing": len(contributed),
-        "n_satellites_missing": len(absent),
-        "satellites_empty": ",".join(empty_handed),
-        "mosaic_complete": int(not absent),
-    })
+    ds.attrs.update(
+        {
+            "nominal_time": t0.isoformat(),
+            "satellites_expected": ",".join(expected_ids),
+            "satellites_contributing": ",".join(contributed),
+            "satellites_missing": ",".join(absent),
+            "n_satellites_expected": len(expected_ids),
+            "n_satellites_contributing": len(contributed),
+            "n_satellites_missing": len(absent),
+            "satellites_empty": ",".join(empty_handed),
+            "mosaic_complete": int(not absent),
+        }
+    )
     return ds
 
 
@@ -218,17 +173,6 @@ def write_mosaic_netcdf(
     and then :func:`os.replace`\\ d into place, so a reader globbing the
     output tree never sees a half-written mosaic and a crashed run leaves
     no partial file under the canonical name.
-
-    Parameters
-    ----------
-    ds : The mosaic dataset, as returned by :func:`build_mosaic`.
-    output_dir : Root of the per-day output layout.
-    t0 : Timestamp the mosaic belongs to.
-
-    Returns
-    -------
-    Path
-        The canonical path now holding the mosaic.
     """
     from operational.adapters.ring import global_nc_path
 
