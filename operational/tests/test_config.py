@@ -16,8 +16,32 @@ class TestDefaults:
     """The out-of-the-box configuration."""
 
     def test_default_satellites(self):
+        """The full ring, including the two icechunk-only satellites."""
         cfg = OperationalConfig()
-        assert cfg.satellites == ("goes18", "goes19", "himawari9", "gk2a")
+        assert cfg.satellites == (
+            "goes18", "goes19", "himawari9", "gk2a", "mtg-i1", "msg-iodc")
+
+    def test_required_satellites_excludes_the_sparse_ones(self):
+        """MTG and IODC get assets, but a run does not wait for them."""
+        cfg = OperationalConfig()
+        assert cfg.required_satellites == (
+            "goes18", "goes19", "himawari9", "gk2a")
+        assert set(cfg.required_satellites) <= set(cfg.satellites)
+
+    def test_narrowing_the_ring_narrows_what_is_required(self):
+        cfg = OperationalConfig().with_satellites("goes19", "mtg-i1")
+        assert cfg.satellites == ("goes19", "mtg-i1")
+        assert cfg.required_satellites == ("goes19",)
+
+    def test_a_ring_of_only_sparse_satellites_requires_them(self):
+        """Otherwise nothing would ever be required, and nothing would run."""
+        cfg = OperationalConfig(satellites=("mtg-i1", "msg-iodc"))
+        assert cfg.required_satellites == ("mtg-i1", "msg-iodc")
+
+    def test_required_must_name_satellites_in_the_ring(self):
+        with pytest.raises(ValueError, match="not in the ring"):
+            OperationalConfig(satellites=("goes19",),
+                              required_satellites=("gk2a",))
 
     def test_default_bands_match_student_dataset(self):
         from stereo_winds.student_dataset import (
@@ -79,7 +103,8 @@ class TestOverrides:
         cfg = OperationalConfig()
         narrowed = cfg.with_satellites("goes19")
         assert narrowed.satellites == ("goes19",)
-        assert cfg.satellites == ("goes18", "goes19", "himawari9", "gk2a")
+        assert cfg.satellites == (
+            "goes18", "goes19", "himawari9", "gk2a", "mtg-i1", "msg-iodc")
         assert narrowed.store_uri == cfg.store_uri
 
     @pytest.mark.parametrize(

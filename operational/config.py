@@ -30,6 +30,12 @@ DEFAULT_RAD_BANDS: tuple[str, ...] = (
     "C12", "C13", "C14", "C15", "C16",
 )
 
+#: Satellites served only from their icechunk stores, with no public-S3
+#: L1b behind them.  Their coverage is sparser and lags the rest, so a
+#: run does not wait on them by default -- they still get an asset, and
+#: the mosaic records them as missing when they are absent.
+SPARSE_COVERAGE: tuple[str, ...] = ("mtg-i1", "msg-iodc")
+
 logger = logging.getLogger(__name__)
 
 #: Prefix for every environment variable read by
@@ -101,9 +107,26 @@ class OperationalConfig:
         Torch device string for inference (``"cpu"``, ``"cuda"``, ...).
     row_strip
         Number of full-disk rows per forward-pass strip.
+
+    Notes
+    -----
+    ``satellites`` is the full ring -- every one of them gets its own
+    asset.  ``required_satellites`` is the subset a timestamp must have
+    before a run is worth starting.
+
+    They differ because MTG-I1 and MSG-IODC are served only from their
+    icechunk stores, with no public-S3 fallback behind them, so their
+    coverage is sparser and later than the rest.  Requiring them would
+    hold up every run for the satellites that *are* there, while the
+    mosaic step already tolerates a missing satellite and records it.
+    Put a satellite in ``required_satellites`` once its coverage is
+    dependable enough to wait for.
     """
 
-    satellites: tuple[str, ...] = ("goes18", "goes19", "himawari9", "gk2a")
+    satellites: tuple[str, ...] = (
+        "goes18", "goes19", "himawari9", "gk2a", "mtg-i1", "msg-iodc",
+    )
+    required_satellites: tuple[str, ...] | None = None
     flow_bands: tuple[str, ...] = tuple(DEFAULT_FLOW_BANDS)
     rad_bands: tuple[str, ...] = tuple(DEFAULT_RAD_BANDS)
     cadence_minutes: int = 60
@@ -119,6 +142,14 @@ class OperationalConfig:
     def __post_init__(self) -> None:
         """Coerce sequence/path fields and reject nonsensical values."""
         object.__setattr__(self, "satellites", tuple(self.satellites))
+        if self.required_satellites is None:
+            dependable = tuple(s for s in self.satellites
+                               if s not in SPARSE_COVERAGE)
+            object.__setattr__(self, "required_satellites",
+                               dependable or tuple(self.satellites))
+        else:
+            object.__setattr__(
+                self, "required_satellites", tuple(self.required_satellites))
         object.__setattr__(self, "flow_bands", tuple(self.flow_bands))
         object.__setattr__(self, "rad_bands", tuple(self.rad_bands))
         object.__setattr__(self, "output_dir", Path(self.output_dir))
@@ -135,6 +166,12 @@ class OperationalConfig:
             raise ValueError("satellites must not be empty")
         if len(set(self.satellites)) != len(self.satellites):
             raise ValueError(f"duplicate satellite ids: {self.satellites}")
+        unknown = set(self.required_satellites) - set(self.satellites)
+        if unknown:
+            raise ValueError(
+                f"required_satellites names satellites that are not in the "
+                f"ring: {sorted(unknown)}"
+            )
         if self.cadence_minutes <= 0:
             raise ValueError(
                 f"cadence_minutes must be positive, got {self.cadence_minutes}"
@@ -304,7 +341,12 @@ class OperationalConfig:
 
     def with_satellites(self, *satellites: str) -> "OperationalConfig":
         """Return a copy restricted to ``satellites`` (order preserved)."""
-        return replace(self, satellites=tuple(satellites))
+        kept = tuple(s for s in self.required_satellites if s in satellites)
+        # Narrowing the ring must not leave required_satellites naming
+        # something the ring no longer has; what survives the narrowing
+        # is kept, and an empty result is re-derived.
+        return replace(self, satellites=tuple(satellites),
+                       required_satellites=kept or None)
 
     # -- environment -------------------------------------------------------
 
