@@ -29,6 +29,7 @@ from dagster import (
     materialize,
 )
 
+from operational.assets.amv_assets import amv_asset_name
 from operational.config import OperationalConfig
 from operational.core.partitions import build_partitions_def
 from operational.definitions import (
@@ -73,7 +74,9 @@ DEFAULT_SATELLITES = OperationalConfig.from_env().satellites
 
 #: Every asset key the code location is expected to expose.
 EXPECTED_ASSET_KEYS = {
-    *(AssetKey(f"amv_{sat_id}") for sat_id in DEFAULT_SATELLITES),
+    # Through the module's own slugifier: mtg-i1 becomes amv_mtg_i1,
+    # since dagster asset names cannot carry a hyphen.
+    *(AssetKey(amv_asset_name(sat_id)) for sat_id in DEFAULT_SATELLITES),
     AssetKey("global_mosaic"),
     AssetKey("published_mosaic"),
 }
@@ -169,7 +172,7 @@ class TestDefinitionsLoad:
         graph = defs.resolve_asset_graph()
         mosaic = graph.get(AssetKey("global_mosaic"))
         assert mosaic.parent_keys == {
-            AssetKey(f"amv_{sat_id}") for sat_id in DEFAULT_SATELLITES
+            AssetKey(amv_asset_name(sat_id)) for sat_id in DEFAULT_SATELLITES
         }
 
     def test_publish_depends_on_the_mosaic(self):
@@ -226,7 +229,7 @@ class TestSatelliteJobs:
     @pytest.mark.parametrize("sat_id", DEFAULT_SATELLITES)
     def test_selects_only_that_satellite(self, sat_id):
         job_def = defs.resolve_job_def(satellite_job_name(sat_id))
-        assert _selected_keys(job_def) == {AssetKey(f"amv_{sat_id}")}
+        assert _selected_keys(job_def) == {AssetKey(amv_asset_name(sat_id))}
 
     def test_can_opt_into_downstream(self):
         job = build_satellite_job(
@@ -692,7 +695,7 @@ class TestEnvironmentShapesTheGraph:
     def test_matching_satellite_list_is_quiet(self, caplog):
         with caplog.at_level("WARNING", logger="operational.definitions"):
             assert check_mosaic_inputs(
-                AssetKey(f"amv_{sat_id}") for sat_id in DEFAULT_SATELLITES
+                AssetKey(amv_asset_name(sat_id)) for sat_id in DEFAULT_SATELLITES
             ) == set()
         assert caplog.text == ""
 
