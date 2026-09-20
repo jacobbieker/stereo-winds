@@ -26,13 +26,6 @@ array under a single ``flag_meanings`` they would silently misattribute
 provenance, so one vocabulary is carried across calls and extended in
 place, seeded from what the store already recorded.  See
 :func:`stereo_winds.icechunk_output.align_source_codes`.
-
-Examples
---------
->>> repo = open_store("output/operational.icechunk")  # doctest: +SKIP
->>> vocabulary = []  # doctest: +SKIP
->>> for t0, mosaic in sorted(mosaics):  # doctest: +SKIP
-...     publish_mosaic(repo, mosaic, t0, vocabulary=vocabulary)
 """
 
 from __future__ import annotations
@@ -65,29 +58,7 @@ __all__ = [
 
 @dataclass(frozen=True)
 class PublishResult:
-    """Outcome of a single :func:`publish_mosaic` call.
-
-    Attributes
-    ----------
-    timestamp
-        The mosaic timestamp this call was about, normalised to naive UTC
-        the way the store records it.
-    written
-        True if a commit was made, False if the timestamp was skipped.
-    skipped_reason
-        Why nothing was written, or None when ``written`` is True.
-    vocabulary
-        Snapshot of the satellite vocabulary after the write.  The
-        caller's own list is the one that keeps being extended in place;
-        this is a copy for logging and assertions.
-    branch
-        Branch the commit went to.
-    action
-        What the store did: ``"created"``, ``"appended"``,
-        ``"replaced"`` or ``"skipped"``.  ``"replaced"`` means an
-        existing timestep was repaired in place rather than a new one
-        added, which is what a resumed satellite produces.
-    """
+    """Outcome of a single :func:`publish_mosaic` call."""
 
     timestamp: datetime
     written: bool
@@ -141,16 +112,6 @@ def as_store_time(t0: datetime) -> datetime:
     compare equal to what the store holds, so every re-run would append a
     duplicate instead of skipping, and a non-UTC ``t0`` would be stored
     at its wall-clock value, off by its own offset.
-
-    Parameters
-    ----------
-    t0
-        Aware or naive timestamp.  A naive one is taken to be UTC already.
-
-    Returns
-    -------
-    datetime
-        The same instant, naive and in UTC.
     """
     if t0.tzinfo is None:
         return t0
@@ -166,26 +127,6 @@ def open_store(
     force_path_style: bool = False,
 ):
     """Open (or create) the icechunk repository the mosaics are published to.
-
-    Parameters
-    ----------
-    store_uri
-        ``s3://bucket/prefix`` or a local directory path.  A local
-        directory is created if it does not exist.
-    endpoint_url
-        Alternative S3 endpoint (MinIO, Ceph, a local test server).
-    region
-        S3 region.
-    anonymous
-        Access the bucket without credentials, for a public store.
-    force_path_style
-        Use path-style S3 addressing, which some S3-compatible servers
-        require.
-
-    Returns
-    -------
-    icechunk.Repository
-        The open repository.
 
     Notes
     -----
@@ -206,27 +147,14 @@ def open_store(
 
 
 def existing_timestamps(repo, branch: str = "main") -> set[datetime]:
-    """Timestamps already committed to ``repo`` (empty for a new store).
-
-    Parameters
-    ----------
-    repo
-        An open icechunk repository.
-    branch
-        Branch to inspect.
-
-    Returns
-    -------
-    set of datetime
-        What the store already holds, as naive UTC, for a caller that
-        wants to filter a batch of work before doing it.  Compare against
-        :func:`as_store_time` of your own timestamps.
-    """
+    """Timestamps already committed to ``repo`` (empty for a new store)."""
     return icechunk_existing_times(repo, branch)
 
 
 def seed_vocabulary(
-    repo, vocabulary: list[str] | None, branch: str = "main",
+    repo,
+    vocabulary: list[str] | None,
+    branch: str = "main",
 ) -> list[str]:
     """Ensure the working vocabulary starts with the store's own.
 
@@ -235,23 +163,6 @@ def seed_vocabulary(
     already occupy; new names are only ever appended.  A resumed run that
     started from an empty list would otherwise renumber the satellites
     and silently misattribute every timestep it appended.
-
-    Parameters
-    ----------
-    repo
-        An open icechunk repository.
-    vocabulary
-        The caller's working list, extended **in place** so the caller
-        keeps the same object across calls.  None means "start from the
-        store".
-    branch
-        Branch to read the stored vocabulary from.
-
-    Returns
-    -------
-    list of str
-        The working vocabulary (the same object as ``vocabulary`` when
-        one was given).
     """
     stored = store_vocabulary(repo, branch)
     if vocabulary is None:
@@ -259,8 +170,7 @@ def seed_vocabulary(
     if not stored or vocabulary[: len(stored)] == stored:
         return vocabulary
     extras = [name for name in vocabulary if name not in stored]
-    logger.info("Re-seeding satellite vocabulary from the store: %s (+%s)",
-                stored, extras)
+    logger.info("Re-seeding satellite vocabulary from the store: %s (+%s)", stored, extras)
     vocabulary[:] = stored + extras
     return vocabulary
 
@@ -297,66 +207,7 @@ def publish_mosaic(
     repair_improved: bool = True,
     replace_existing: bool = False,
 ) -> PublishResult:
-    """Append one global mosaic to the icechunk store as its own commit.
-
-    Parameters
-    ----------
-    repo
-        An open icechunk repository, from :func:`open_store`.
-    ds_global
-        The mosaic: dims ``(latitude, longitude)``, the seven AMV
-        variables plus ``source_satellite_index``.
-    t0
-        Timestamp of the mosaic; becomes its position along ``time``.
-        Normalised to naive UTC by :func:`as_store_time`.
-    branch
-        Branch to commit to.
-    chunk
-        Spatial chunk size used when the dataset is first created.  It is
-        ignored on later appends, which inherit the stored chunking.
-    vocabulary
-        Shared satellite vocabulary, **mutated in place** as new
-        satellites appear.  Pass the same list on every call of a run;
-        None seeds a fresh one from the store.
-    skip_existing
-        Skip a timestamp the store already holds instead of writing it
-        again.  This is what makes a re-run safe.  Set it False to write
-        regardless, which replaces the stored timestep -- a timestamp
-        never appears twice along ``time``.
-    allow_out_of_order
-        Permit a ``t0`` older than the store's latest timestamp.  The
-        append leaves ``time`` unsorted, and an unsorted index makes
-        range selections return nothing instead of raising, so this is
-        refused by default.  Backfills should be published in
-        chronological order.
-    repair_improved
-        Replace a stored timestep when this mosaic covers satellites it
-        does not.  This is what a resume is for: the schedule may have
-        published a degraded mosaic while a satellite was down, and once
-        that satellite is retrieved the timestep should be corrected
-        rather than left permanently short.  A mosaic that adds nothing
-        is still skipped, so ordinary re-runs stay no-ops.  Requires a
-        store new enough to record ``satellites_contributing``; without
-        it there is nothing to compare and the timestep is skipped.
-    replace_existing
-        Replace the stored timestep whether or not it improves on what
-        is there.  For deliberate republication -- a corrected model, a
-        changed grid -- rather than routine operation.
-
-    Returns
-    -------
-    PublishResult
-        Whether a commit happened, and the vocabulary after the write.
-
-    Raises
-    ------
-    ValueError
-        If ``t0`` predates the store's latest timestamp and
-        ``allow_out_of_order`` is False.
-    RuntimeError
-        If the store did not record the satellite vocabulary the mosaic
-        was written against.
-    """
+    """Append one global mosaic to the icechunk store as its own commit."""
     t0 = as_store_time(t0)
     vocabulary = seed_vocabulary(repo, vocabulary, branch)
     stored_times = icechunk_existing_times(repo, branch)
@@ -374,22 +225,29 @@ def publish_mosaic(
             replace = True
             logger.info(
                 "Repairing %s: this mosaic adds %s to the %s already stored",
-                time_tag(t0), ", ".join(sorted(gained)),
-                ", ".join(sorted(already)) or "(none)")
+                time_tag(t0),
+                ", ".join(sorted(gained)),
+                ", ".join(sorted(already)) or "(none)",
+            )
         elif skip_existing:
             reason = f"{time_tag(t0)} is already in the store"
             if already is None and repair_improved:
                 reason += " (it does not record which satellites it used)"
             logger.info("Skipping publish: %s", reason)
             return PublishResult(
-                timestamp=t0, written=False, skipped_reason=reason,
-                vocabulary=tuple(vocabulary), branch=branch, action="skipped",
+                timestamp=t0,
+                written=False,
+                skipped_reason=reason,
+                vocabulary=tuple(vocabulary),
+                branch=branch,
+                action="skipped",
             )
         else:
             replace = True
             logger.info(
-                "Publishing %s again with skip_existing=False; replacing the "
-                "stored timestep", time_tag(t0))
+                "Publishing %s again with skip_existing=False; replacing the " "stored timestep",
+                time_tag(t0),
+            )
     elif stored_times and t0 < max(stored_times) and not allow_out_of_order:  # noqa: E501
         raise ValueError(
             f"Refusing to publish {time_tag(t0)}: the store already holds "
@@ -399,13 +257,22 @@ def publish_mosaic(
         )
 
     action = write_mosaic_to_icechunk(
-        repo, ds_global, t0, branch=branch, chunk=chunk, vocabulary=vocabulary,
+        repo,
+        ds_global,
+        t0,
+        branch=branch,
+        chunk=chunk,
+        vocabulary=vocabulary,
         replace=replace,
     )
     if vocabulary and "source_satellite_index" in ds_global:
         _check_stored_vocabulary(repo, branch, vocabulary)
     logger.info("Published %s (vocabulary: %s)", time_tag(t0), vocabulary)
     return PublishResult(
-        timestamp=t0, written=True, skipped_reason=None,
-        vocabulary=tuple(vocabulary), branch=branch, action=action or "appended",
+        timestamp=t0,
+        written=True,
+        skipped_reason=None,
+        vocabulary=tuple(vocabulary),
+        branch=branch,
+        action=action or "appended",
     )
