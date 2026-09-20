@@ -160,23 +160,6 @@ def satellite_job_name(sat_id: str) -> str:
     construction, so an unslugified name fails the whole code location
     rather than just that job.  Punctuation is therefore replaced with
     underscores here.
-
-    Parameters
-    ----------
-    sat_id : str
-        Satellite id, e.g. ``"goes18"`` or ``"mtg-i1"``.
-
-    Returns
-    -------
-    str
-        ``"operational_amv_<slugified sat_id>_job"``, e.g.
-        ``"operational_amv_mtg_i1_job"``.
-
-    Raises
-    ------
-    ValueError
-        If ``sat_id`` has no alphanumeric characters to build a name
-        from.
     """
     safe = _UNSAFE_IN_NAME.sub("_", sat_id).strip("_")
     if not safe:
@@ -185,23 +168,7 @@ def satellite_job_name(sat_id: str) -> str:
 
 
 def max_concurrent_from_env(env: Mapping[str, str] | None = None) -> int:
-    """Read the step-concurrency limit from the environment.
-
-    Parameters
-    ----------
-    env : Mapping[str, str], optional
-        Mapping to read instead of :data:`os.environ`.
-
-    Returns
-    -------
-    int
-        The value of :data:`MAX_CONCURRENT_ENV_VAR` when it is set to a
-        positive integer, otherwise :data:`DEFAULT_MAX_CONCURRENT`.  A
-        malformed or non-positive value is logged and ignored rather than
-        raised on, because this is read while a code location loads and a
-        typo in a deployment's environment should not take the location
-        down.
-    """
+    """Read the step-concurrency limit from the environment."""
     source: Mapping[str, str] = os.environ if env is None else env
     raw = source.get(MAX_CONCURRENT_ENV_VAR, "").strip()
     if not raw:
@@ -228,27 +195,7 @@ def max_concurrent_from_env(env: Mapping[str, str] | None = None) -> int:
 
 
 def modest_executor(max_concurrent: int | None = None) -> ExecutorDefinition:
-    """Build the memory-conscious executor these jobs run under.
-
-    Parameters
-    ----------
-    max_concurrent : int, optional
-        Steps allowed in flight at once.  Defaults to
-        :func:`max_concurrent_from_env`.
-
-    Returns
-    -------
-    dagster.ExecutorDefinition
-        A configured multiprocess executor.  Process-per-step matters as
-        much as the limit itself: the memory a full-disk retrieval
-        allocates goes back to the OS when its process exits, which it
-        would not do inside a long-lived in-process run.
-
-    Raises
-    ------
-    ValueError
-        If ``max_concurrent`` is given and is below 1.
-    """
+    """Build the memory-conscious executor these jobs run under."""
     limit = max_concurrent_from_env() if max_concurrent is None else max_concurrent
     if limit < 1:
         raise ValueError(f"max_concurrent must be >= 1, got {limit}")
@@ -277,31 +224,7 @@ def build_full_job(
     retry_policy: RetryPolicy | None = None,
     tags: Mapping[str, str] | None = None,
 ) -> UnresolvedAssetJobDefinition:
-    """Build the job covering the whole pipeline for one partition.
-
-    Parameters
-    ----------
-    name : str, optional
-        Job name.  Defaults to :data:`FULL_JOB_NAME`.
-    selection : CoercibleToAssetSelection, optional
-        Assets to include.  Defaults to every asset in the code location,
-        which is the per-satellite AMV assets plus the mosaic and publish
-        assets; pass a narrower selection to carve out a subset without
-        depending on the assets' naming.
-    max_concurrent : int, optional
-        Steps in flight at once.  See :func:`modest_executor`.
-    retry_policy : dagster.RetryPolicy, optional
-        Per-step retry policy.  Defaults to :data:`DEFAULT_RETRY_POLICY`.
-    tags : Mapping[str, str], optional
-        Run tags.  Defaults to :data:`RUN_TAGS`.
-
-    Returns
-    -------
-    dagster.UnresolvedAssetJobDefinition
-        The job, resolved against the asset graph by
-        :class:`~dagster.Definitions`.  Its partitions are inferred from
-        the selected assets, so it is partitioned by timestamp.
-    """
+    """Build the job covering the whole pipeline for one partition."""
     return _define_asset_job(
         name=name,
         selection=AssetSelection.all() if selection is None else selection,
@@ -324,38 +247,7 @@ def build_satellite_job(
     retry_policy: RetryPolicy | None = None,
     tags: Mapping[str, str] | None = None,
 ) -> UnresolvedAssetJobDefinition:
-    """Build the re-run job for a single satellite.
-
-    Parameters
-    ----------
-    sat_id : str
-        Satellite id, used for the job name and description.
-    asset_keys : iterable of dagster.AssetKey
-        Keys of that satellite's AMV asset.  Passed in rather than
-        derived from ``sat_id`` so this module makes no assumption about
-        how the AMV unit names its assets.
-    include_downstream : bool, optional
-        When True the mosaic and publish steps run after the retrieval.
-        Off by default: re-running one satellite normally means fixing
-        one input, and rebuilding the mosaic from a partially refreshed
-        set of inputs is rarely what is wanted.
-    max_concurrent : int, optional
-        Steps in flight at once.  See :func:`modest_executor`.
-    retry_policy : dagster.RetryPolicy, optional
-        Per-step retry policy.
-    tags : Mapping[str, str], optional
-        Run tags.
-
-    Returns
-    -------
-    dagster.UnresolvedAssetJobDefinition
-        A job named by :func:`satellite_job_name`.
-
-    Raises
-    ------
-    ValueError
-        If ``asset_keys`` is empty.
-    """
+    """Build the re-run job for a single satellite."""
     keys = list(asset_keys)
     if not keys:
         raise ValueError(f"no asset keys given for satellite {sat_id!r}")
@@ -379,31 +271,9 @@ def build_satellite_jobs(
     satellite_asset_keys: Mapping[str, Iterable[AssetKey]],
     **kwargs: Any,
 ) -> list[UnresolvedAssetJobDefinition]:
-    """Build one re-run job per satellite.
-
-    Parameters
-    ----------
-    satellite_asset_keys : Mapping[str, iterable of dagster.AssetKey]
-        Satellite id to that satellite's asset keys.
-    **kwargs
-        Forwarded to :func:`build_satellite_job`.
-
-    Returns
-    -------
-    list of dagster.UnresolvedAssetJobDefinition
-        Jobs in the iteration order of ``satellite_asset_keys``.
-
-    Raises
-    ------
-    ValueError
-        If two satellite ids slug to the same job name — ``mtg-i1`` and
-        ``mtg_i1``, say.  Dagster rejects a repository with duplicate job
-        names while resolving it, which fails the whole code location
-        with no mention of the satellites that caused it.
-    """
+    """Build one re-run job per satellite."""
     jobs = [
-        build_satellite_job(sat_id, keys, **kwargs)
-        for sat_id, keys in satellite_asset_keys.items()
+        build_satellite_job(sat_id, keys, **kwargs) for sat_id, keys in satellite_asset_keys.items()
     ]
     seen: dict[str, str] = {}
     for sat_id, job in zip(satellite_asset_keys, jobs):
@@ -427,18 +297,6 @@ def supports_minute_of_hour(partitions_def: PartitionsDefinition) -> bool:
     an offset to anything else does not warn, it raises while the code
     location is loading, which would take the whole deployment down for
     the sake of a cosmetic firing time.
-
-    Parameters
-    ----------
-    partitions_def : dagster.PartitionsDefinition
-        The partitions the schedule's job is built on.
-
-    Returns
-    -------
-    bool
-        True when the partition cron is ``<minute> * * * *`` or
-        ``<minute> <hour> * * *``; False for everything else, including
-        partitions with no cron at all.
     """
     cron = getattr(partitions_def, "cron_schedule", None)
     if not isinstance(cron, str):
@@ -480,36 +338,6 @@ def build_backstop_schedule(
     disk, or the backstop turns a missed tick into a duplicated one.
     Dagster's run-level concurrency limits are the place to cap the
     wasted work.
-
-    Parameters
-    ----------
-    job : dagster.UnresolvedAssetJobDefinition
-        The partitioned job to launch — normally the output of
-        :func:`build_full_job`.
-    partitions_def : dagster.PartitionsDefinition
-        The partitions ``job`` resolves to.  It must be that grid and not
-        a separately-read setting: Dagster validates the offset against
-        the job's own partitions, but not until the code location is
-        being resolved, so passing a different grid here turns a wrong
-        firing time into a code location that will not load.
-    name : str, optional
-        Schedule name.  Defaults to :data:`BACKSTOP_SCHEDULE_NAME`.
-    minute_of_hour : int, optional
-        Minute past the hour to fire at, or None to fire exactly on the
-        partition boundary.  Dropped when the partitions do not accept an
-        offset — see :func:`supports_minute_of_hour`.
-    default_status : dagster.DefaultScheduleStatus, optional
-        Whether the schedule is running when first deployed.  Running by
-        default — a backstop that has to be switched on is not a backstop.
-    tags : Mapping[str, str], optional
-        Run tags.  Defaults to :data:`BACKSTOP_RUN_TAGS`, which marks the
-        run as schedule-triggered.
-
-    Returns
-    -------
-    dagster.UnresolvedPartitionedAssetScheduleDefinition
-        A schedule targeting ``job``, requesting the most recently closed
-        partition on each tick with the partition key as the run key.
     """
     offset = minute_of_hour if supports_minute_of_hour(partitions_def) else None
     if minute_of_hour is not None and offset is None:

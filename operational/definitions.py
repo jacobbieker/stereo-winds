@@ -143,6 +143,7 @@ RAFT_CHECKPOINT_ENV_VAR = "STEREO_WINDS_RAFT_CKPT"
 # Partitions
 # ---------------------------------------------------------------------------
 
+
 def resolve_partitions_def(
     config: OperationalConfig | None = None,
     env: Mapping[str, str] | None = None,
@@ -159,27 +160,6 @@ def resolve_partitions_def(
     The cadence the configuration *currently* asks for is still compared
     against it, because a difference means the asset modules were
     imported under a different environment from the one loading them now.
-
-    Parameters
-    ----------
-    config : OperationalConfig, optional
-        Supplies the cadence to cross-check.  Defaults to
-        :meth:`OperationalConfig.from_env`.
-    env : Mapping[str, str], optional
-        Mapping to read the configuration from instead of
-        :data:`os.environ`.
-
-    Returns
-    -------
-    dagster.PartitionsDefinition
-        The partitions the mosaic asset was built with.
-
-    Raises
-    ------
-    ValueError
-        If the mosaic asset is unpartitioned.  Every asset in this
-        pipeline is per-timestamp, so an unpartitioned one means the
-        asset module is broken, and failing here names the cause.
     """
     cfg = OperationalConfig.from_env(env) if config is None else config
     existing = global_mosaic.partitions_def
@@ -211,6 +191,7 @@ def resolve_partitions_def(
 # Resources
 # ---------------------------------------------------------------------------
 
+
 def _env_or(var: str, default: str, env: Mapping[str, str] | None = None) -> str:
     """Resolve a resource field from the environment, or fall back.
 
@@ -225,20 +206,6 @@ def _env_or(var: str, default: str, env: Mapping[str, str] | None = None) -> str
     A variable set to blank counts as unset, matching
     :meth:`OperationalConfig.from_env`, so an empty value in a unit file
     or a compose file falls back instead of binding to ``""``.
-
-    Parameters
-    ----------
-    var : str
-        Environment variable name.
-    default : str
-        Value used when ``var`` is unset or blank.
-    env : Mapping[str, str], optional
-        Mapping to read instead of :data:`os.environ`.
-
-    Returns
-    -------
-    str
-        An ``EnvVar``, a literal value from ``env``, or ``default``.
     """
     source: Mapping[str, str] = os.environ if env is None else env
     raw = source.get(var, "").strip()
@@ -257,40 +224,19 @@ def default_resources(
     Every resource here is constructible with no checkpoint, no network
     and no GPU: they record locations and settings, and open them lazily
     inside a run.
-
-    Parameters
-    ----------
-    config : OperationalConfig, optional
-        Defaults to :meth:`OperationalConfig.from_env`.
-    env : Mapping[str, str], optional
-        Mapping to read environment overrides from.
-    satellites : sequence of str, optional
-        Satellite list to advertise to the steps.  Defaults to the
-        configuration's, but :func:`build_definitions` passes the
-        satellites the asset graph was actually built for, so no step is
-        told about a satellite that has no asset.
-
-    Returns
-    -------
-    dict
-        Keyed ``"paths"``, ``"store"``, ``"model"`` and
-        ``"run_settings"`` — the keys the assets declare.
     """
     cfg = OperationalConfig.from_env(env) if config is None else config
     ring = list(cfg.satellites if satellites is None else satellites)
     return {
         "paths": PathsResource(
-            output_dir=_env_or(
-                "STEREO_WINDS_OP_OUTPUT_DIR", str(cfg.output_dir), env
-            ),
+            output_dir=_env_or("STEREO_WINDS_OP_OUTPUT_DIR", str(cfg.output_dir), env),
         ),
         "store": IcechunkStoreResource(
             store_uri=_env_or("STEREO_WINDS_OP_STORE_URI", cfg.store_uri, env),
         ),
         "model": ModelResource(
             student_ckpt=_env_or(CHECKPOINT_ENV_VAR, DEFAULT_CHECKPOINT, env),
-            raft_ckpt=_env_or(
-                RAFT_CHECKPOINT_ENV_VAR, DEFAULT_RAFT_CHECKPOINT, env),
+            raft_ckpt=_env_or(RAFT_CHECKPOINT_ENV_VAR, DEFAULT_RAFT_CHECKPOINT, env),
             device=_env_or("STEREO_WINDS_OP_DEVICE", cfg.device, env),
             row_strip=cfg.row_strip,
         ),
@@ -309,23 +255,13 @@ def default_resources(
 # Sensors
 # ---------------------------------------------------------------------------
 
+
 def discover_sensors(module: ModuleType = sensors_module) -> list[SensorDefinition]:
     """Collect the sensor objects a module defines.
 
     Discovering them rather than importing them by name keeps this module
     from having to track what the sensor unit calls its sensors, and
     picks up a second sensor automatically if one is added.
-
-    Parameters
-    ----------
-    module : module, optional
-        Module to scan.  Defaults to :mod:`operational.sensors`.
-
-    Returns
-    -------
-    list of dagster.SensorDefinition
-        Sensors in name order, de-duplicated by name so one exported
-        under an alias is not registered twice.
     """
     found: dict[str, SensorDefinition] = {}
     for attr in dir(module):
@@ -341,9 +277,8 @@ def discover_sensors(module: ModuleType = sensors_module) -> list[SensorDefiniti
 # Cross-checks
 # ---------------------------------------------------------------------------
 
-def check_satellite_agreement(
-    config: OperationalConfig, satellites: Iterable[str]
-) -> set[str]:
+
+def check_satellite_agreement(config: OperationalConfig, satellites: Iterable[str]) -> set[str]:
     """Compare the configured ring with the one the assets were built for.
 
     The asset modules read the satellite list when *they* are imported;
@@ -352,18 +287,6 @@ def check_satellite_agreement(
     step would then be told about a ring that does not match the assets
     that exist, so the difference is worth a line in the log and is
     corrected before it reaches the resources.
-
-    Parameters
-    ----------
-    config : OperationalConfig
-        The configuration this code location was assembled with.
-    satellites : iterable of str
-        Satellite ids the asset graph was actually built for.
-
-    Returns
-    -------
-    set of str
-        Ids the two disagree about; empty when they match.
     """
     configured = set(config.satellites)
     built = set(satellites)
@@ -393,17 +316,6 @@ def check_mosaic_inputs(amv_keys: Iterable[AssetKey]) -> set[AssetKey]:
     satellite list from somewhere of its own.  It warns rather than
     raises because a deployment deliberately running a subset of the ring
     is legitimate.
-
-    Parameters
-    ----------
-    amv_keys : iterable of dagster.AssetKey
-        Keys of the per-satellite assets this code location built.
-
-    Returns
-    -------
-    set of dagster.AssetKey
-        Inputs the mosaic declares that no built asset supplies.  Empty
-        when the two agree.
     """
     built = set(amv_keys)
     declared: set[AssetKey] = set()
@@ -431,6 +343,7 @@ def check_mosaic_inputs(amv_keys: Iterable[AssetKey]) -> set[AssetKey]:
 # The code location
 # ---------------------------------------------------------------------------
 
+
 def resolve_amv_assets(
     partitions_def: PartitionsDefinition,
     config: OperationalConfig,
@@ -447,21 +360,6 @@ def resolve_amv_assets(
 
     The fallback builds them from ``config`` through the module's
     ``build_amv_asset`` factory, for an AMV module that offers only that.
-
-    Parameters
-    ----------
-    partitions_def : dagster.PartitionsDefinition
-        Partitions for assets built by the fallback path.
-    config : OperationalConfig
-        Supplies the satellite list for the fallback path.
-    module : module, optional
-        Module to take the assets from.  Defaults to
-        :mod:`operational.assets.amv_assets`.
-
-    Returns
-    -------
-    dict
-        Satellite id to that satellite's :class:`~dagster.AssetsDefinition`.
     """
     prebuilt = getattr(module, "AMV_ASSETS_BY_SAT", None)
     if isinstance(prebuilt, Mapping) and prebuilt:
@@ -470,10 +368,7 @@ def resolve_amv_assets(
         "%s exposes no AMV_ASSETS_BY_SAT; building from the configuration",
         module.__name__,
     )
-    return {
-        sat_id: module.build_amv_asset(sat_id, partitions_def)
-        for sat_id in config.satellites
-    }
+    return {sat_id: module.build_amv_asset(sat_id, partitions_def) for sat_id in config.satellites}
 
 
 def build_definitions(
@@ -487,27 +382,12 @@ def build_definitions(
     the resources, the jobs and the cross-checks — not which assets
     exist.  Changing the satellite list or the cadence means reloading
     the code location, which is what a Dagster deployment does anyway.
-
-    Parameters
-    ----------
-    config : OperationalConfig, optional
-        Defaults to :meth:`OperationalConfig.from_env`.
-    env : Mapping[str, str], optional
-        Mapping to read environment overrides from, for tests.
-
-    Returns
-    -------
-    dagster.Definitions
-        Assets, jobs, the backstop schedule, the sensors and the
-        resources.
     """
     cfg = OperationalConfig.from_env(env) if config is None else config
     partitions = resolve_partitions_def(cfg, env)
 
     amv_by_sat = resolve_amv_assets(partitions, cfg)
-    satellite_keys = {
-        sat_id: list(asset_def.keys) for sat_id, asset_def in amv_by_sat.items()
-    }
+    satellite_keys = {sat_id: list(asset_def.keys) for sat_id, asset_def in amv_by_sat.items()}
     check_satellite_agreement(cfg, satellite_keys)
     check_mosaic_inputs(key for keys in satellite_keys.values() for key in keys)
 
