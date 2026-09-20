@@ -37,31 +37,7 @@ STALE_TMP_AGE_S = 6 * 3600.0
 
 @dataclass(frozen=True, eq=False)
 class AmvResult:
-    """Outcome of one satellite's retrieval at one timestamp.
-
-    Attributes
-    ----------
-    sat_id
-        Satellite the retrieval was run for.
-    timestamp
-        Target time of the retrieval.
-    path
-        NetCDF file holding the result.
-    dataset
-        The retrieval itself, with dimensions ``(y, x)``.
-    reused
-        True when an existing file on disk was loaded instead of the
-        retrieval being recomputed.
-    n_bands_missing
-        Number of requested channels that had to be zero-filled.
-    bands_missing
-        Names of those channels, in the order the attrs record them.
-    quality_degraded
-        True when enough channels were missing that upstream flagged the
-        retrieval as lower confidence.
-    quality_note
-        Human-readable summary of the shortfall, if upstream wrote one.
-    """
+    """Outcome of one satellite's retrieval at one timestamp."""
 
     sat_id: str
     timestamp: datetime
@@ -87,7 +63,7 @@ def _as_int(value: Any, default: int = 0) -> int:
         return default
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         logger.warning("Ignoring unparsable quality attr %r", value)
         return default
 
@@ -107,9 +83,8 @@ def _as_flag(value: Any) -> bool:
         return False
     try:
         return bool(int(value))
-    except (TypeError, ValueError):
-        logger.warning(
-            "Unreadable quality_degraded attr %r — treating as degraded", value)
+    except TypeError, ValueError:
+        logger.warning("Unreadable quality_degraded attr %r — treating as degraded", value)
         return True
 
 
@@ -126,19 +101,6 @@ def _as_band_tuple(value: Any) -> tuple[str, ...]:
 
 def quality_from_attrs(attrs: dict) -> dict[str, Any]:
     """Lift the upstream quality attrs off a retrieval's attrs.
-
-    Parameters
-    ----------
-    attrs
-        ``Dataset.attrs`` as written by the ring script's
-        ``quality_attrs``.
-
-    Returns
-    -------
-    dict
-        ``n_bands_missing``, ``bands_missing``, ``quality_degraded`` and
-        ``quality_note``, defaulted to "nothing missing" when the attrs
-        are absent.
 
     Notes
     -----
@@ -186,12 +148,19 @@ def _log_quality(result: AmvResult) -> AmvResult:
     make that run look spotless.
     """
     if result.quality_degraded:
-        logger.warning("[%s] degraded retrieval%s: %s", result.sat_id,
-                       " (reused)" if result.reused else "",
-                       result.quality_note or "no note recorded")
+        logger.warning(
+            "[%s] degraded retrieval%s: %s",
+            result.sat_id,
+            " (reused)" if result.reused else "",
+            result.quality_note or "no note recorded",
+        )
     elif result.n_bands_missing:
-        logger.info("[%s] %d band(s) zero-filled: %s", result.sat_id,
-                    result.n_bands_missing, ", ".join(result.bands_missing))
+        logger.info(
+            "[%s] %d band(s) zero-filled: %s",
+            result.sat_id,
+            result.n_bands_missing,
+            ", ".join(result.bands_missing),
+        )
     return result
 
 
@@ -295,42 +264,7 @@ def run_satellite_amv(
     row_strip: int = 1024,
     skip_existing: bool = True,
 ) -> AmvResult:
-    """Retrieve winds for one satellite at one timestamp.
-
-    Parameters
-    ----------
-    sat_id
-        Satellite to process, e.g. ``"goes19"``.
-    t0
-        Target timestamp.
-    model, disp
-        Student model and stereo-disparity model passed straight through
-        to the retrieval.
-    flow_bands, rad_bands
-        Channels for the flow and radiance input stacks.
-    output_dir
-        Root of the per-day output tree.
-    device
-        Torch device for the forward pass.
-    row_strip
-        Rows per forward-pass strip.
-    skip_existing
-        When True and the canonical file already exists, load and return
-        it instead of recomputing.  This is what makes a resumed run
-        cheap; set False to force a recompute.
-
-    Returns
-    -------
-    AmvResult
-        The retrieval, its path, and the quality attrs lifted from it.
-
-    Raises
-    ------
-    Exception
-        Whatever the retrieval raises is propagated unchanged, so the
-        caller (a Dagster asset) can mark the step failed.  No partial
-        file is left behind when it does.
-    """
+    """Retrieve winds for one satellite at one timestamp."""
     out_dir = Path(output_dir)
     path = Path(ring_adapter.sat_nc_path(out_dir, sat_id, t0))
 

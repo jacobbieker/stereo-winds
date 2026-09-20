@@ -66,11 +66,19 @@ def stub_infer(monkeypatch):
 
 def _run(out_dir, sat_id="goes19", t0=T0, **kwargs):
     return run_satellite_amv(
-        sat_id, t0, None, None, BANDS, BANDS, out_dir, **kwargs,
+        sat_id,
+        t0,
+        None,
+        None,
+        BANDS,
+        BANDS,
+        out_dir,
+        **kwargs,
     )
 
 
 # ── Successful run ────────────────────────────────────────────────────
+
 
 class TestSuccessfulRun:
     def test_writes_file_at_canonical_path(self, tmp_path, stub_infer):
@@ -146,6 +154,7 @@ class TestSuccessfulRun:
 
 # ── Resume behaviour ──────────────────────────────────────────────────
 
+
 class TestSkipExisting:
     def test_second_call_reuses_without_recomputing(self, tmp_path, stub_infer):
         first = _run(tmp_path, skip_existing=True)
@@ -191,10 +200,10 @@ class TestSkipExisting:
 
 # ── Quality attrs ─────────────────────────────────────────────────────
 
+
 class TestQualityAttrs:
     def test_clean_retrieval(self, tmp_path, stub_infer):
-        stub_infer.attrs.update(
-            ring_adapter.quality_attrs(BANDS, BANDS, {"flow": [], "rad": []}))
+        stub_infer.attrs.update(ring_adapter.quality_attrs(BANDS, BANDS, {"flow": [], "rad": []}))
         result = _run(tmp_path)
         assert result.n_bands_missing == 0
         assert result.bands_missing == ()
@@ -203,30 +212,33 @@ class TestQualityAttrs:
 
     def test_degraded_retrieval(self, tmp_path, stub_infer):
         stub_infer.attrs.update(
-            ring_adapter.quality_attrs(BANDS, BANDS, {"flow": ["C08"], "rad": []}))
+            ring_adapter.quality_attrs(BANDS, BANDS, {"flow": ["C08"], "rad": []})
+        )
         result = _run(tmp_path)
         assert result.n_bands_missing == 1
         assert result.bands_missing == ("C08",)
         assert result.quality_degraded is True
         assert "DEGRADED" in result.quality_note
 
-    def test_missing_band_below_threshold_is_not_degraded(self, tmp_path,
-                                                          stub_infer):
+    def test_missing_band_below_threshold_is_not_degraded(self, tmp_path, stub_infer):
         many = [f"C{i:02d}" for i in range(1, 17)]
         stub_infer.attrs.update(
-            ring_adapter.quality_attrs(many, many, {"flow": [], "rad": ["C01"]}))
+            ring_adapter.quality_attrs(many, many, {"flow": [], "rad": ["C01"]})
+        )
         result = _run(tmp_path)
         assert result.n_bands_missing == 1
         assert result.quality_degraded is False
 
     def test_attrs_are_lifted_not_recomputed(self, tmp_path, stub_infer):
         """Whatever upstream wrote is reported, even if it looks odd."""
-        stub_infer.attrs.update({
-            "bands_missing": "C07,C09",
-            "n_bands_missing": 2,
-            "quality_degraded": 1,
-            "quality_note": "upstream said so",
-        })
+        stub_infer.attrs.update(
+            {
+                "bands_missing": "C07,C09",
+                "n_bands_missing": 2,
+                "quality_degraded": 1,
+                "quality_note": "upstream said so",
+            }
+        )
         result = _run(tmp_path)
         assert result.bands_missing == ("C07", "C09")
         assert result.n_bands_missing == 2
@@ -242,7 +254,8 @@ class TestQualityAttrs:
 
     def test_quality_survives_the_netcdf_round_trip(self, tmp_path, stub_infer):
         stub_infer.attrs.update(
-            ring_adapter.quality_attrs(BANDS, BANDS, {"flow": ["C08"], "rad": []}))
+            ring_adapter.quality_attrs(BANDS, BANDS, {"flow": ["C08"], "rad": []})
+        )
         fresh = _run(tmp_path)
         reused = _run(tmp_path, skip_existing=True)
         assert reused.reused is True
@@ -250,11 +263,11 @@ class TestQualityAttrs:
         assert reused.bands_missing == fresh.bands_missing
         assert reused.quality_degraded == fresh.quality_degraded
 
-    def test_degraded_is_logged_on_the_resume_path(self, tmp_path, stub_infer,
-                                                    caplog):
+    def test_degraded_is_logged_on_the_resume_path(self, tmp_path, stub_infer, caplog):
         """A resumed run must still report which satellites were degraded."""
         stub_infer.attrs.update(
-            ring_adapter.quality_attrs(BANDS, BANDS, {"flow": ["C08"], "rad": []}))
+            ring_adapter.quality_attrs(BANDS, BANDS, {"flow": ["C08"], "rad": []})
+        )
         _run(tmp_path)
         caplog.clear()
         with caplog.at_level("WARNING", logger="operational.core.amv"):
@@ -276,8 +289,7 @@ class TestQualityAttrs:
 
     def test_unreadable_flag_fails_closed(self):
         """An unreadable quality flag must not be reported as clean."""
-        assert quality_from_attrs({"quality_degraded": "yes"})[
-            "quality_degraded"] is True
+        assert quality_from_attrs({"quality_degraded": "yes"})["quality_degraded"] is True
 
     def test_absent_flag_is_not_degraded(self):
         """Absent is different from unreadable: upstream predates the attr."""
@@ -285,11 +297,12 @@ class TestQualityAttrs:
 
     def test_numpy_scalar_flag_round_trips(self):
         import numpy as np
-        assert quality_from_attrs({"quality_degraded": np.int64(1)})[
-            "quality_degraded"] is True
+
+        assert quality_from_attrs({"quality_degraded": np.int64(1)})["quality_degraded"] is True
 
 
 # ── Failure handling ──────────────────────────────────────────────────
+
 
 class TestFailurePropagates:
     @pytest.fixture
@@ -316,6 +329,7 @@ class TestFailurePropagates:
 
     def test_failed_write_leaves_nothing(self, tmp_path, monkeypatch, stub_infer):
         """A crash mid-write must not leave a half-file at the real path."""
+
         def bad_to_netcdf(self, path, *args, **kwargs):
             Path(path).write_bytes(b"half a netcdf")
             raise OSError("disk full")
@@ -336,8 +350,7 @@ class TestFailurePropagates:
             _run(tmp_path)
         assert list(tmp_path.rglob("*")) == [tmp_path / "20260801"]
 
-    def test_one_satellite_failing_leaves_the_others(self, tmp_path,
-                                                     monkeypatch):
+    def test_one_satellite_failing_leaves_the_others(self, tmp_path, monkeypatch):
         def fake(sat_id, t0, *args, **kwargs):
             if sat_id == "goes19":
                 raise RuntimeError("goes19 is down")
@@ -352,6 +365,7 @@ class TestFailurePropagates:
 
 
 # ── Atomic write ──────────────────────────────────────────────────────
+
 
 class TestAtomicWrite:
     def _tmp_paths_used(self, tmp_path, monkeypatch, n=2):
@@ -368,24 +382,19 @@ class TestAtomicWrite:
             _run(tmp_path, skip_existing=False)
         return seen
 
-    def test_never_writes_directly_to_the_canonical_path(self, tmp_path,
-                                                         monkeypatch,
-                                                         stub_infer):
+    def test_never_writes_directly_to_the_canonical_path(self, tmp_path, monkeypatch, stub_infer):
         final = ring_adapter.sat_nc_path(tmp_path, "goes19", T0)
         seen = self._tmp_paths_used(tmp_path, monkeypatch, n=1)
         assert seen[0] != final
         assert seen[0].name.endswith(TMP_SUFFIX)
 
-    def test_temp_file_sits_beside_the_final_file(self, tmp_path, monkeypatch,
-                                                  stub_infer):
+    def test_temp_file_sits_beside_the_final_file(self, tmp_path, monkeypatch, stub_infer):
         """Same directory, so ``os.replace`` stays within one filesystem."""
         final = ring_adapter.sat_nc_path(tmp_path, "goes19", T0)
         seen = self._tmp_paths_used(tmp_path, monkeypatch, n=1)
         assert seen[0].parent == final.parent
 
-    def test_concurrent_attempts_use_distinct_temp_files(self, tmp_path,
-                                                         monkeypatch,
-                                                         stub_infer):
+    def test_concurrent_attempts_use_distinct_temp_files(self, tmp_path, monkeypatch, stub_infer):
         """Two overlapping attempts must not write over each other."""
         seen = self._tmp_paths_used(tmp_path, monkeypatch, n=2)
         assert len(set(seen)) == 2
@@ -421,8 +430,7 @@ class TestStaleTempReaping:
         with xr.open_dataset(result.path) as ds:
             assert ds.attrs["satellite_id"] == "goes19"
 
-    def test_reaping_failure_does_not_fail_the_write(self, tmp_path,
-                                                     monkeypatch, stub_infer):
+    def test_reaping_failure_does_not_fail_the_write(self, tmp_path, monkeypatch, stub_infer):
         orphan = self._orphan(tmp_path, STALE_TMP_AGE_S + 60)
         real_unlink = Path.unlink
 
@@ -436,6 +444,7 @@ class TestStaleTempReaping:
 
 
 # ── Result shape ──────────────────────────────────────────────────────
+
 
 class TestAmvResult:
     def test_is_frozen(self, tmp_path, stub_infer):
