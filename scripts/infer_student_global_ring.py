@@ -1456,6 +1456,20 @@ class GlobalMosaic:
         return ds_global
 
 
+def _satellite_names(value) -> list[str]:
+    """Normalise a ``satellites`` attribute to a list of names.
+
+    It is a real list in memory, a comma-separated string once written
+    to NetCDF or zarr, and that string's characters if handed to
+    ``list()`` by mistake.
+    """
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, np.ndarray)):
+        return [str(v) for v in value]
+    return [part for part in str(value).split(",") if part]
+
+
 def decode_source_satellite(ds: xr.Dataset) -> np.ndarray:
     """Satellite ids behind ``source_satellite_index``, as a string array.
 
@@ -1464,9 +1478,14 @@ def decode_source_satellite(ds: xr.Dataset) -> np.ndarray:
     you only need a region.
     """
     index = ds["source_satellite_index"].values
-    names = ds["source_satellite_index"].attrs.get("flag_meanings", "").split()
+    names = str(
+        ds["source_satellite_index"].attrs.get("flag_meanings", "")
+    ).split()
     if not names:
-        names = list(ds.attrs.get("satellites", []))
+        # ``satellites`` is a comma-separated string, so list() on it
+        # yields single characters and every cell decodes to "g".  It
+        # arrives as a real list only before a round trip through a file.
+        names = _satellite_names(ds.attrs.get("satellites"))
     out = np.full(index.shape, "", dtype=f"U{max((len(n) for n in names), default=1)}")
     for code, name in enumerate(names):
         out[index == code] = name

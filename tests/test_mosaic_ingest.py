@@ -263,3 +263,91 @@ class TestIngest:
         written, failed = ingest_script.ingest(found, repo, vocabulary=[])
         assert written == 2
         assert failed == [T0 + timedelta(hours=6)]
+
+
+class TestPerTimestepQuality:
+    """Quality describes one timestep, not whatever was written last."""
+
+    @staticmethod
+    def _mosaic(satellites, degraded, note):
+        idx = np.full((4, 8), -1, dtype="int8")
+        for code, _ in enumerate(satellites):
+            idx[:, code::len(satellites)] = code
+        ds = xr.Dataset(
+            {"u_wind": (("latitude", "longitude"),
+                        np.full((4, 8), 10.0, dtype="float32")),
+             "source_satellite_index": (("latitude", "longitude"), idx)},
+            coords={"latitude": np.linspace(-80, 80, 4),
+                    "longitude": np.linspace(-180, 175, 8)},
+        )
+        ds.attrs.update(
+            satellites=list(satellites),
+            quality_degraded=int(degraded),
+            quality_note=note,
+            satellites_missing="gk2a" if degraded else "",
+        )
+        return ds
+
+    def test_a_clean_append_does_not_erase_an_earlier_degraded_cycle(self, tmp_path):
+        repo = open_icechunk_repo(str(tmp_path / "amv.icechunk"))
+        vocabulary: list[str] = []
+        write_mosaic_to_icechunk(
+            repo, self._mosaic(["goes18"], True, "DEGRADED: gk2a missing"),
+            datetime(2026, 8, 1, 0, 0), vocabulary=vocabulary)
+        write_mosaic_to_icechunk(
+            repo, self._mosaic(["goes18", "gk2a"], False, "complete"),
+            datetime(2026, 8, 1, 6, 0), vocabulary=vocabulary)
+
+        ds = xr.open_zarr(repo.readonly_session("main").store, consolidated=False)
+        assert [int(v) for v in ds["quality_degraded"].values] == [1, 0]
+        assert str(ds["quality_note"].values[0]) == "DEGRADED: gk2a missing"
+        assert str(ds["satellites_missing"].values[0]) == "gk2a"
+
+    def test_quality_is_not_a_group_attribute(self, tmp_path):
+        """Group attrs are rewritten on every append; these must not be."""
+        repo = open_icechunk_repo(str(tmp_path / "amv.icechunk"))
+        write_mosaic_to_icechunk(
+            repo, self._mosaic(["goes18"], True, "DEGRADED"),
+            datetime(2026, 8, 1, 0, 0), vocabulary=[])
+        ds = xr.open_zarr(repo.readonly_session("main").store, consolidated=False)
+        assert "quality_degraded" not in ds.attrs
+        assert "quality_note" not in ds.attrs
+        assert "quality_degraded" in ds.variables
+
+    def test_replace_repairs_a_timestep_without_duplicating_it(self, tmp_path):
+        repo = open_icechunk_repo(str(tmp_path / "amv.icechunk"))
+        vocabulary: list[str] = []
+        t0 = datetime(2026, 8, 1, 0, 0)
+        write_mosaic_to_icechunk(
+            repo, self._mosaic(["goes18"], True, "DEGRADED: gk2a missing"),
+            t0, vocabulary=vocabulary)
+
+        repaired = self._mosaic(["goes18", "gk2a"], False, "repaired")
+        assert write_mosaic_to_icechunk(
+            repo, repaired, t0, vocabulary=vocabulary) == "skipped"
+        assert write_mosaic_to_icechunk(
+            repo, repaired, t0, vocabulary=vocabulary, replace=True) == "replaced"
+
+        ds = xr.open_zarr(repo.readonly_session("main").store, consolidated=False)
+        assert ds.sizes["time"] == 1, "a replace must not append a duplicate"
+        assert int(ds["quality_degraded"].values[0]) == 0
+        assert str(ds["quality_note"].values[0]) == "repaired"
+        assert set(np.unique(ds["source_satellite_index"].values)) == {0, 1}
+
+    def test_a_store_without_the_quality_variables_still_accepts_appends(
+            self, tmp_path):
+        """Stores written before this change must keep working."""
+        repo = open_icechunk_repo(str(tmp_path / "old.icechunk"))
+        vocabulary: list[str] = []
+        plain = self._mosaic(["goes18"], False, "")
+        del plain.attrs["quality_degraded"], plain.attrs["quality_note"]
+        del plain.attrs["satellites_missing"]
+        write_mosaic_to_icechunk(
+            repo, plain, datetime(2026, 8, 1, 0, 0), vocabulary=vocabulary)
+        write_mosaic_to_icechunk(
+            repo, self._mosaic(["goes18"], True, "DEGRADED"),
+            datetime(2026, 8, 1, 6, 0), vocabulary=vocabulary)
+
+        ds = xr.open_zarr(repo.readonly_session("main").store, consolidated=False)
+        assert ds.sizes["time"] == 2
+        assert "quality_degraded" not in ds.variables

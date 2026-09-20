@@ -637,3 +637,33 @@ class TestMosaicQuality:
         back = xr.open_dataset(path)
         assert back.attrs["quality_degraded"] == 1
         assert "DEGRADED" in back.attrs["quality_note"]
+
+
+class TestDecodeWithoutFlagMeanings:
+    """Decoding falls back to the ``satellites`` attribute correctly."""
+
+    @staticmethod
+    def _mosaic(satellites_attr):
+        index = np.array([[0, 1], [1, -1]], dtype="int8")
+        ds = xr.Dataset({"source_satellite_index": (("y", "x"), index)})
+        ds.attrs["satellites"] = satellites_attr
+        return ds
+
+    def test_a_comma_separated_attribute_decodes_to_whole_names(self):
+        """A file round trip turns the list into a string.
+
+        ``list()`` on that string yields its characters, so every cell
+        decoded to a single letter.
+        """
+        names = ring.decode_source_satellite(self._mosaic("goes18,goes19"))
+        assert set(names.ravel()) == {"goes18", "goes19", ""}
+
+    def test_a_list_attribute_still_decodes(self):
+        names = ring.decode_source_satellite(self._mosaic(["goes18", "goes19"]))
+        assert set(names.ravel()) == {"goes18", "goes19", ""}
+
+    def test_flag_meanings_wins_when_present(self):
+        ds = self._mosaic("wrong,also-wrong")
+        ds["source_satellite_index"].attrs["flag_meanings"] = "goes18 goes19"
+        names = ring.decode_source_satellite(ds)
+        assert set(names.ravel()) == {"goes18", "goes19", ""}
