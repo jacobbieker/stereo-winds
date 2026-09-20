@@ -24,12 +24,6 @@ cannot break ``GlobalMosaic`` halfway through a mosaic.  If any
 re-exported name ever disappears upstream, importing this module fails
 immediately with a message listing every casualty, instead of raising
 :class:`AttributeError` deep inside a Dagster run.
-
-Examples
---------
->>> from operational.adapters.ring import GlobalMosaic, RING_SATELLITES
->>> RING_SATELLITES[0]
-'goes18'
 """
 
 from __future__ import annotations
@@ -122,23 +116,13 @@ def _exec_ring_module() -> ModuleType:
     classes defined by the script have a resolvable ``__module__`` and
     recursive imports see a partially-initialised module rather than
     re-executing the file.
-
-    Returns
-    -------
-    types.ModuleType
-        The freshly executed script module.
-
-    Raises
-    ------
-    FileNotFoundError
-        If the script is missing from the checkout.
-    ImportError
-        If Python cannot build a loader for the script.
     """
     existing = sys.modules.get(RING_MODULE_NAME)
-    if existing is not None and getattr(existing, "__file__", None) == str(
-        RING_SCRIPT
-    ) and hasattr(existing, _REQUIRED_NAMES[0]):
+    if (
+        existing is not None
+        and getattr(existing, "__file__", None) == str(RING_SCRIPT)
+        and hasattr(existing, _REQUIRED_NAMES[0])
+    ):
         # Someone (a reloaded copy of this adapter, say) already executed
         # the script under our name; reuse it rather than running the
         # module-level code a second time.
@@ -172,16 +156,6 @@ def load_ring() -> ModuleType:
     every later call in the same process returns the cached module, so
     repeated use is cheap.  Concurrent callers are serialised on a lock
     and all receive the same object.
-
-    Returns
-    -------
-    types.ModuleType
-        The ring script module.
-
-    Raises
-    ------
-    FileNotFoundError
-        If the script is missing from the checkout.
     """
     global _RING_MODULE
     module = _RING_MODULE
@@ -194,25 +168,7 @@ def load_ring() -> ModuleType:
 
 
 def _require(module: ModuleType, name: str) -> Any:
-    """Fetch ``name`` from ``module`` or explain that it vanished upstream.
-
-    Parameters
-    ----------
-    module : types.ModuleType
-        The loaded ring script module.
-    name : str
-        Attribute the operational package re-exports.
-
-    Returns
-    -------
-    Any
-        The attribute's value.
-
-    Raises
-    ------
-    AttributeError
-        If the script no longer defines ``name``.
-    """
+    """Fetch ``name`` from ``module`` or explain that it vanished upstream."""
     try:
         return getattr(module, name)
     except AttributeError:
@@ -225,18 +181,7 @@ def _require(module: ModuleType, name: str) -> Any:
 
 
 def _check_required(module: ModuleType) -> None:
-    """Fail loudly if the script stopped defining a re-exported name.
-
-    Parameters
-    ----------
-    module : types.ModuleType
-        The loaded ring script module.
-
-    Raises
-    ------
-    AttributeError
-        Naming every missing symbol, not only the first one bound below.
-    """
+    """Fail loudly if the script stopped defining a re-exported name."""
     missing = [name for name in _REQUIRED_NAMES if not hasattr(module, name)]
     if missing:
         raise AttributeError(
@@ -272,9 +217,7 @@ Describes how much of the requested input the retrieval actually received,
 so zero-filled channels travel with the data.
 """
 
-satellite_available_times: Callable[..., np.ndarray] = _require(
-    _ring, "satellite_available_times"
-)
+satellite_available_times: Callable[..., np.ndarray] = _require(_ring, "satellite_available_times")
 """Sorted scan times a satellite can supply within a window.
 
 ``satellite_available_times(sat_id, band, start, end,
@@ -282,9 +225,7 @@ product="ABI-L1b-RadF", include_s3_fallback=True)``. Hits icechunk and/or
 S3 — never call it from an offline test.
 """
 
-availability_band: Callable[..., str | None] = _require(
-    _ring, "availability_band"
-)
+availability_band: Callable[..., str | None] = _require(_ring, "availability_band")
 """``availability_band(sat_id, flow_bands, rad_bands)`` -> band id or None.
 
 The first requested band the satellite actually carries; scan times are a
@@ -306,9 +247,7 @@ sat_nc_path: Callable[..., Path] = _require(_ring, "sat_nc_path")
 global_nc_path: Callable[..., Path] = _require(_ring, "global_nc_path")
 """``global_nc_path(out_dir, t)`` -> mosaic NetCDF path for a timestamp."""
 
-filter_to_common_times: Callable[..., list] = _require(
-    _ring, "filter_to_common_times"
-)
+filter_to_common_times: Callable[..., list] = _require(_ring, "filter_to_common_times")
 """Keep only timestamps every satellite can deliver a full triplet for.
 
 ``filter_to_common_times(times, sats, flow_bands, rad_bands, dt_min=None,
@@ -334,9 +273,7 @@ there would raise ``KeyError`` for every satellite.
 DT_MINUTES: int = _require(_ring, "DT_MINUTES")
 """Default temporal-pair spacing, in minutes."""
 
-SCAN_INTERVAL_MINUTES: dict[str, int] = dict(
-    _require(_ring, "SCAN_INTERVAL_MINUTES")
-)
+SCAN_INTERVAL_MINUTES: dict[str, int] = dict(_require(_ring, "SCAN_INTERVAL_MINUTES"))
 """Per-satellite overrides of :data:`DT_MINUTES` for the scan cycle.
 
 A copy; call :func:`scan_interval` rather than reading this directly,
