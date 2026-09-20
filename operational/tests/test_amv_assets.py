@@ -192,7 +192,9 @@ class TestBuildAmvAsset:
             assert asset_def.op.retry_policy == DEFAULT_RETRY_POLICY
 
     def test_module_level_default_set(self):
-        assert list(AMV_ASSETS_BY_SAT) == list(SATELLITES)
+        # The module-level set follows the configured ring, which is not
+        # the short list these tests build their own assets from.
+        assert list(AMV_ASSETS_BY_SAT) == list(amv_assets.DEFAULT_CONFIG.satellites)
         assert AMV_ASSETS == list(AMV_ASSETS_BY_SAT.values())
         assert len({a.key for a in AMV_ASSETS}) == len(AMV_ASSETS)
 
