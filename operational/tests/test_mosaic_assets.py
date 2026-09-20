@@ -137,8 +137,13 @@ class TestGlobalMosaicAsset:
         assert mosaic_path.exists()
         with xr.open_dataset(mosaic_path) as ds:
             assert ds["u_wind"].dims == ("latitude", "longitude")
-            assert set(ds.attrs) >= {"time", "satellites", "resolution_m",
-                                     "quality_degraded", "quality_note"}
+            assert set(ds.attrs) >= {
+                "time",
+                "satellites",
+                "resolution_m",
+                "quality_degraded",
+                "quality_note",
+            }
             # NetCDF keeps the upstream list; only the icechunk path
             # normalises this attribute to a comma-separated string.
             sats = ds.attrs["satellites"]
@@ -186,7 +191,9 @@ class TestGlobalMosaicAsset:
         assert not result.success
 
     def test_satellite_with_no_usable_pixels_counts_as_missing(
-        self, tmp_path, tmp_store_uri,
+        self,
+        tmp_path,
+        tmp_store_uri,
     ):
         """A file full of rejected pixels is a coverage gap, not a success."""
         out = tmp_path / "output"
@@ -248,7 +255,9 @@ class TestPublishedMosaicAsset:
     """Appending mosaics to a real local icechunk store."""
 
     def test_writes_one_commit_readable_with_time_size_one(
-        self, tmp_path, tmp_store_uri,
+        self,
+        tmp_path,
+        tmp_store_uri,
     ):
         out = tmp_path / "output"
         for sat in SATELLITES:
@@ -269,9 +278,16 @@ class TestPublishedMosaicAsset:
 
         ds = read_store(tmp_store_uri)
         assert ds.sizes["time"] == 1
-        assert set(ds.data_vars) >= {"u_wind", "v_wind", "cloud_top_height",
-                                     "quality_flag", "sigma_u", "sigma_v",
-                                     "sigma_h", "source_satellite_index"}
+        assert set(ds.data_vars) >= {
+            "u_wind",
+            "v_wind",
+            "cloud_top_height",
+            "quality_flag",
+            "sigma_u",
+            "sigma_v",
+            "sigma_h",
+            "source_satellite_index",
+        }
 
         # The init snapshot plus exactly one mosaic commit.
         repo = open_store(tmp_store_uri)

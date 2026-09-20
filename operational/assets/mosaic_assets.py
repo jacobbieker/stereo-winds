@@ -99,7 +99,10 @@ _CONFIG = OperationalConfig.from_env()
 #: ``skip_existing`` turned off a retry would append the timestamp twice,
 #: which is one more reason to leave it on outside a controlled backfill.
 PUBLISH_RETRY_POLICY = RetryPolicy(
-    max_retries=4, delay=10, backoff=Backoff.EXPONENTIAL, jitter=Jitter.PLUS_MINUS,
+    max_retries=4,
+    delay=10,
+    backoff=Backoff.EXPONENTIAL,
+    jitter=Jitter.PLUS_MINUS,
 )
 
 _UNSAFE_NAME_CHARS = re.compile(r"[^A-Za-z0-9_]")
@@ -109,20 +112,9 @@ _UNSAFE_NAME_CHARS = re.compile(r"[^A-Za-z0-9_]")
 # Locating what the per-satellite assets wrote
 # ---------------------------------------------------------------------------
 
+
 def per_satellite_path(output_dir: Path | str, sat_id: str, t0: datetime) -> Path:
-    """Canonical path of one satellite's AMV file for a cycle.
-
-    Parameters
-    ----------
-    output_dir : Root output directory.
-    sat_id : Satellite id, e.g. ``"goes18"``.
-    t0 : Cycle timestamp.
-
-    Returns
-    -------
-    pathlib.Path
-        ``<output_dir>/<YYYYMMDD>/student_amv_<sat>_<YYYYMMDDTHHMM>.nc``.
-    """
+    """Canonical path of one satellite's AMV file for a cycle."""
     # Deferred: loading the ring module pulls in torch, and nothing in this
     # module needs it until an asset actually runs.
     from operational.adapters.ring import sat_nc_path
@@ -131,24 +123,14 @@ def per_satellite_path(output_dir: Path | str, sat_id: str, t0: datetime) -> Pat
 
 
 def load_available_retrievals(
-    output_dir: Path | str, satellites: list[str], t0: datetime,
+    output_dir: Path | str,
+    satellites: list[str],
+    t0: datetime,
 ) -> dict[str, xr.Dataset]:
     """Load every per-satellite retrieval that made it to disk for ``t0``.
 
     A satellite whose file is absent — or present but unreadable, which a
     crash mid-write can leave behind — is skipped rather than raised on.
-
-    Parameters
-    ----------
-    output_dir : Root output directory.
-    satellites : Satellites the cycle asked for.
-    t0 : Cycle timestamp.
-
-    Returns
-    -------
-    dict
-        Satellite id -> its dataset, loaded into memory (the file handle is
-        closed), for the satellites that produced one.
     """
     per_sat: dict[str, xr.Dataset] = {}
     for sat_id in satellites:
@@ -160,8 +142,7 @@ def load_available_retrievals(
             with xr.open_dataset(path) as handle:
                 per_sat[sat_id] = handle.load()
         except Exception:
-            logger.exception("%s: could not read %s — treating as missing",
-                             sat_id, path)
+            logger.exception("%s: could not read %s — treating as missing", sat_id, path)
     return per_sat
 
 
@@ -189,14 +170,14 @@ def _amv_asset_keys(satellites: tuple[str, ...]) -> list[AssetKey]:
     except Exception:  # pragma: no cover - only before that unit lands
         logger.warning(
             "amv_assets not importable; falling back to the amv_<sat> naming "
-            "convention for dependency keys", exc_info=True,
+            "convention for dependency keys",
+            exc_info=True,
         )
 
     keys = []
     for sat in satellites:
         definition = by_sat.get(sat)
-        keys.append(definition.key if definition is not None
-                    else AssetKey(amv_asset_name(sat)))
+        keys.append(definition.key if definition is not None else AssetKey(amv_asset_name(sat)))
     return keys
 
 
@@ -224,26 +205,12 @@ def _note_missing(ds: xr.Dataset, absent: list[str]) -> None:
 # Asset factory
 # ---------------------------------------------------------------------------
 
+
 def build_mosaic_assets(
     satellites: tuple[str, ...] | list[str] | None = None,
     partitions_def: PartitionsDefinition | None = None,
 ) -> list[AssetsDefinition]:
-    """Build the mosaic and publish assets for one deployment.
-
-    Parameters
-    ----------
-    satellites : Satellites the cycle depends on and looks for. Used both
-        for the declared ``deps`` and for the run-time search, so the
-        dependency graph and the mosaic can never disagree. Defaults to
-        :class:`~operational.config.OperationalConfig`.
-    partitions_def : Partitions both assets are keyed by. Defaults to
-        :data:`~operational.core.partitions.OPERATIONAL_PARTITIONS`.
-
-    Returns
-    -------
-    list of AssetsDefinition
-        ``[global_mosaic, published_mosaic]``.
-    """
+    """Build the mosaic and publish assets for one deployment."""
     declared = tuple(satellites if satellites is not None else _CONFIG.satellites)
     partitions = partitions_def or OPERATIONAL_PARTITIONS
 
@@ -265,15 +232,7 @@ def build_mosaic_assets(
         paths: PathsResource,
         run_settings: RunSettingsResource,
     ) -> str:
-        """Merge the cycle's per-satellite retrievals into one global mosaic.
-
-        Returns
-        -------
-        str
-            Path of the mosaic NetCDF. A path rather than the dataset
-            itself: a global mosaic is far too large to hand through an I/O
-            manager, and the file is the product consumers already expect.
-        """
+        """Merge the cycle's per-satellite retrievals into one global mosaic."""
         t0 = time_for(context.partition_key)
         output_dir = Path(paths.output_dir)
         expected = list(run_settings.satellites)
@@ -310,7 +269,9 @@ def build_mosaic_assets(
         # so a failed satellite left no trace in the file's attributes
         # and every mosaic looked complete.
         ds_global = build_mosaic(
-            per_sat, t0, resolution_m=run_settings.resolution_m,
+            per_sat,
+            t0,
+            resolution_m=run_settings.resolution_m,
             expected=expected,
         )
         loaded = sorted(per_sat)
@@ -346,31 +307,30 @@ def build_mosaic_assets(
             )
 
         if absent:
-            logger.warning("Mosaicking %s without %s", t0.isoformat(),
-                           ", ".join(absent))
+            logger.warning("Mosaicking %s without %s", t0.isoformat(), ", ".join(absent))
         _note_missing(ds_global, absent)
 
         out_path = write_mosaic_netcdf(ds_global, output_dir, t0)
 
-        context.add_output_metadata({
-            "partition": t0.isoformat(),
-            "contributing_satellites": ",".join(contributing) or "(none)",
-            "n_contributing": len(contributing),
-            "missing_satellites": ",".join(absent) or "(none)",
-            "n_missing": len(absent),
-            "empty_satellites": ",".join(empty) or "(none)",
-            "quality_degraded": MetadataValue.bool(
-                bool(int(ds_global.attrs.get("quality_degraded", 0)))
-            ),
-            "quality_note": MetadataValue.text(
-                str(ds_global.attrs.get("quality_note", ""))
-            ),
-            "output_path": MetadataValue.path(str(out_path)),
-            "valid_cells": valid_cells,
-            "valid_cell_fraction": round(valid_cells / n_cells, 6) if n_cells else 0.0,
-            "grid_shape": f"{source_index.shape[0]} x {source_index.shape[1]}",
-            "resolution_m": float(run_settings.resolution_m),
-        })
+        context.add_output_metadata(
+            {
+                "partition": t0.isoformat(),
+                "contributing_satellites": ",".join(contributing) or "(none)",
+                "n_contributing": len(contributing),
+                "missing_satellites": ",".join(absent) or "(none)",
+                "n_missing": len(absent),
+                "empty_satellites": ",".join(empty) or "(none)",
+                "quality_degraded": MetadataValue.bool(
+                    bool(int(ds_global.attrs.get("quality_degraded", 0)))
+                ),
+                "quality_note": MetadataValue.text(str(ds_global.attrs.get("quality_note", ""))),
+                "output_path": MetadataValue.path(str(out_path)),
+                "valid_cells": valid_cells,
+                "valid_cell_fraction": round(valid_cells / n_cells, 6) if n_cells else 0.0,
+                "grid_shape": f"{source_index.shape[0]} x {source_index.shape[1]}",
+                "resolution_m": float(run_settings.resolution_m),
+            }
+        )
         return str(out_path)
 
     @asset(
@@ -390,18 +350,7 @@ def build_mosaic_assets(
         store: IcechunkStoreResource,
         run_settings: RunSettingsResource,
     ) -> str:
-        """Append one mosaic to the icechunk store.
-
-        Parameters
-        ----------
-        global_mosaic : Path of the mosaic NetCDF, from the upstream asset.
-
-        Returns
-        -------
-        str
-            The store URI, so downstream assets can depend on the store
-            rather than on a file.
-        """
+        """Append one mosaic to the icechunk store."""
         t0 = time_for(context.partition_key)
         mosaic_path = Path(global_mosaic)
         with xr.open_dataset(mosaic_path) as handle:
@@ -418,20 +367,21 @@ def build_mosaic_assets(
         )
 
         times = sorted(existing_timestamps(repo, store.branch))
-        context.add_output_metadata({
-            "partition": t0.isoformat(),
-            "store_uri": MetadataValue.text(store.store_uri),
-            "branch": store.branch,
-            "written": MetadataValue.bool(bool(result.written)),
-            "skipped_reason": result.skipped_reason or "(not skipped)",
-            "time_size": len(times),
-            "time_range": (
-                f"{times[0].isoformat()} .. {times[-1].isoformat()}"
-                if times else "(empty)"
-            ),
-            "satellite_vocabulary": ",".join(result.vocabulary) or "(none)",
-            "source_mosaic": MetadataValue.path(str(mosaic_path)),
-        })
+        context.add_output_metadata(
+            {
+                "partition": t0.isoformat(),
+                "store_uri": MetadataValue.text(store.store_uri),
+                "branch": store.branch,
+                "written": MetadataValue.bool(bool(result.written)),
+                "skipped_reason": result.skipped_reason or "(not skipped)",
+                "time_size": len(times),
+                "time_range": (
+                    f"{times[0].isoformat()} .. {times[-1].isoformat()}" if times else "(empty)"
+                ),
+                "satellite_vocabulary": ",".join(result.vocabulary) or "(none)",
+                "source_mosaic": MetadataValue.path(str(mosaic_path)),
+            }
+        )
         return store.store_uri
 
     return [_global_mosaic, _published_mosaic]
