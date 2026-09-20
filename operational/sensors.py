@@ -136,7 +136,7 @@ def _decode_cursor(raw: str | None) -> dict[str, datetime]:
     try:
         payload = json.loads(raw)
         items = payload["watermarks"]
-    except (ValueError, TypeError, KeyError):
+    except ValueError, TypeError, KeyError:
         logger.warning("Ignoring unparseable sensor cursor %r", raw)
         return {}
     out: dict[str, datetime] = {}
@@ -150,25 +150,11 @@ def _decode_cursor(raw: str | None) -> dict[str, datetime]:
     return out
 
 
-def _resolve_watermark_path(
-    watermark_path: Path | str | None, config: OperationalConfig
-) -> Path:
+def _resolve_watermark_path(watermark_path: Path | str | None, config: OperationalConfig) -> Path:
     """Pick the watermark file and pin it to an absolute path.
 
     Precedence is explicit argument, then the ``STEREO_WINDS_OPERATIONAL_WATERMARK``
     environment variable, then ``config.output_dir / "watermarks.json"``.
-
-    Parameters
-    ----------
-    watermark_path
-        Explicit override, or ``None`` to fall back to env/config.
-    config
-        Operational settings supplying the default output directory.
-
-    Returns
-    -------
-    Path
-        Absolute path, resolved once at definition time.
 
     Notes
     -----
@@ -199,29 +185,7 @@ def _collect_per_satellite(
     window_end: datetime,
     log: logging.Logger,
 ) -> tuple[dict[str, list[datetime]], dict[str, str]]:
-    """Ask each satellite what is newly available inside the look-back window.
-
-    Parameters
-    ----------
-    config
-        Operational settings (bands, cadence, tolerance).
-    satellites
-        Satellite ids to poll.
-    store
-        Watermark store used to pick each satellite's search start.
-    window_start, window_end
-        Bounds of the look-back window; a watermark older than ``window_start``
-        is clamped to it.
-    log
-        Logger used for per-satellite diagnostics.
-
-    Returns
-    -------
-    reported : dict
-        Sorted, de-duplicated timestamps per satellite that answered.
-    failures : dict
-        Error text per satellite whose lookup raised.
-    """
+    """Ask each satellite what is newly available inside the look-back window."""
     reported: dict[str, list[datetime]] = {}
     failures: dict[str, str] = {}
 
@@ -281,26 +245,7 @@ def _select_timestamps(
     satellites: Sequence[str],
     require_all: bool,
 ) -> tuple[list[datetime], dict[datetime, list[str]]]:
-    """Apply the readiness rule to the per-satellite availability.
-
-    Parameters
-    ----------
-    reported
-        Timestamps each satellite that answered can deliver.
-    satellites
-        The full configured roster -- a satellite missing from ``reported``
-        (because its lookup failed) can never satisfy ``require_all``.
-    require_all
-        ``True`` to emit only timestamps every configured satellite can deliver.
-
-    Returns
-    -------
-    emitted : list of datetime
-        Timestamps to request runs for, ascending.
-    providers : dict
-        Satellites backing each candidate timestamp (all candidates, emitted or
-        not), for logging.
-    """
+    """Apply the readiness rule to the per-satellite availability."""
     providers: dict[datetime, list[str]] = {}
     for sat_id in satellites:
         for t in reported.get(sat_id, ()):  # type: ignore[arg-type]
@@ -324,19 +269,6 @@ def _advance_watermarks(
 ) -> None:
     """Advance every watermark up to, but never past, the oldest withheld candidate.
 
-    Parameters
-    ----------
-    store
-        Watermark store to update.
-    reported
-        Timestamps each satellite reported this tick (ascending).
-    emitted
-        Timestamps that actually produced a run request.
-    providers
-        Every candidate timestamp seen this tick and the satellites backing it.
-    log
-        Logger for the resulting watermark moves.
-
     Notes
     -----
     The barrier is *global*, not per satellite.  A timestamp withheld because one
@@ -358,9 +290,7 @@ def _advance_watermarks(
     barrier = min(withheld) if withheld else None
 
     for sat_id, timestamps in reported.items():
-        eligible = [
-            t for t in timestamps if t in emitted_set and (barrier is None or t < barrier)
-        ]
+        eligible = [t for t in timestamps if t in emitted_set and (barrier is None or t < barrier)]
         if not eligible:
             continue
         advanced_to = max(eligible)
@@ -391,9 +321,7 @@ def _skip_message(
         f"(rule: {'all' if require_all else 'any'} of {len(satellites)} satellites)."
     ]
     if providers:
-        withheld = ", ".join(
-            f"{_fmt(t)} [{'+'.join(providers[t])}]" for t in sorted(providers)
-        )
+        withheld = ", ".join(f"{_fmt(t)} [{'+'.join(providers[t])}]" for t in sorted(providers))
         parts.append(f"Waiting on {len(providers)} candidate(s): {withheld}.")
         contributing = {sat for backers in providers.values() for sat in backers}
         # Distinguish "answered, had nothing new" from "could not be asked" --
@@ -426,33 +354,7 @@ def build_availability_sensor(
     default_status: DefaultSensorStatus = DefaultSensorStatus.STOPPED,
     now_fn: Callable[[], datetime] | None = None,
 ) -> SensorDefinition:
-    """Build the sensor that requests runs for newly available timestamps.
-
-    Parameters
-    ----------
-    config
-        Operational settings; defaults to :class:`OperationalConfig` defaults.
-    watermark_path
-        Watermark file; defaults to ``config.output_dir / "watermarks.json"``.
-    lookback_hours
-        Bound on how far back a tick searches.  Must be positive.
-    require_all
-        ``True`` (default) emits a timestamp only when every configured
-        satellite can deliver it; ``False`` emits as soon as any can.
-    minimum_interval_seconds
-        Dagster's floor on the gap between ticks.
-    name, job_name, job, default_status
-        Standard Dagster sensor wiring.  ``job`` takes precedence over
-        ``job_name`` when given.
-    now_fn
-        Clock used for the look-back window; injectable for tests.
-
-    Returns
-    -------
-    SensorDefinition
-        A sensor yielding :class:`RunRequest` per ready partition, or a single
-        :class:`SkipReason` when nothing is ready.
-    """
+    """Build the sensor that requests runs for newly available timestamps."""
     cfg = config or OperationalConfig()
     if lookback_hours <= 0:
         raise ValueError("lookback_hours must be positive")
@@ -471,9 +373,10 @@ def build_availability_sensor(
     satellites = tuple(cfg.required_satellites or cfg.satellites)
     if set(satellites) != set(cfg.satellites):
         logger.info(
-            "Waiting on %s; %s will be mosaicked when present but not "
-            "waited for", ", ".join(satellites),
-            ", ".join(sorted(set(cfg.satellites) - set(satellites))))
+            "Waiting on %s; %s will be mosaicked when present but not " "waited for",
+            ", ".join(satellites),
+            ", ".join(sorted(set(cfg.satellites) - set(satellites))),
+        )
     rule = "all" if require_all else "any"
 
     description = (
