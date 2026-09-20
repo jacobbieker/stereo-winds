@@ -56,16 +56,6 @@ def as_naive_utc(t: datetime) -> datetime:
     tz-aware UTC, so a raw ``t in store.existing_times()`` between the
     two is always ``False`` and a ``<`` comparison raises ``TypeError``.
     Passing timestamps through here first removes that trap.
-
-    Parameters
-    ----------
-    t : datetime
-        Naive (assumed UTC) or tz-aware.
-
-    Returns
-    -------
-    datetime
-        Naive, shifted to UTC when the input carried an offset.
     """
     if t.tzinfo is None:
         return t
@@ -111,22 +101,7 @@ class PathsResource(ConfigurableResource):
         return root
 
     def sat_path(self, sat_id: str, t: datetime, *, create: bool = False) -> Path:
-        """Path of the per-satellite full-disk AMV file for ``t``.
-
-        Parameters
-        ----------
-        sat_id : str
-            Satellite id, e.g. ``"goes18"``.
-        t : datetime
-            Nominal timestamp of the retrieval.
-        create : bool, default False
-            Create the containing per-day directory.  The file itself is
-            never created here.
-
-        Returns
-        -------
-        pathlib.Path
-        """
+        """Path of the per-satellite full-disk AMV file for ``t``."""
         from operational.adapters.ring import sat_nc_path
 
         path = Path(sat_nc_path(self.root, sat_id, t))
@@ -135,19 +110,7 @@ class PathsResource(ConfigurableResource):
         return path
 
     def mosaic_path(self, t: datetime, *, create: bool = False) -> Path:
-        """Path of the merged global mosaic file for ``t``.
-
-        Parameters
-        ----------
-        t : datetime
-            Nominal timestamp of the mosaic.
-        create : bool, default False
-            Create the containing per-day directory.
-
-        Returns
-        -------
-        pathlib.Path
-        """
+        """Path of the merged global mosaic file for ``t``."""
         from operational.adapters.ring import global_nc_path
 
         path = Path(global_nc_path(self.root, t))
@@ -176,10 +139,7 @@ class IcechunkStoreResource(ConfigurableResource):
 
     store_uri: str = Field(
         default=_DEFAULTS.store_uri,
-        description=(
-            "Icechunk store location: a local directory path or "
-            "'s3://bucket/prefix'."
-        ),
+        description=("Icechunk store location: a local directory path or " "'s3://bucket/prefix'."),
     )
     endpoint_url: str | None = Field(
         default=None,
@@ -192,8 +152,7 @@ class IcechunkStoreResource(ConfigurableResource):
     anonymous: bool = Field(
         default=False,
         description=(
-            "Access the bucket anonymously instead of using ambient "
-            "credentials. S3 stores only."
+            "Access the bucket anonymously instead of using ambient " "credentials. S3 stores only."
         ),
     )
     force_path_style: bool = Field(
@@ -229,13 +188,7 @@ class IcechunkStoreResource(ConfigurableResource):
         return self.store_uri.startswith(("s3://", "s3a://"))
 
     def repo(self) -> "icechunk.Repository":
-        """Open (or create) the repository, caching it.
-
-        Returns
-        -------
-        icechunk.Repository
-            The same object on every call for this resource instance.
-        """
+        """Open (or create) the repository, caching it."""
         if self._repo is None:
             from stereo_winds.icechunk_output import open_icechunk_repo
 
@@ -252,15 +205,6 @@ class IcechunkStoreResource(ConfigurableResource):
     def existing_times(self) -> set[datetime]:
         """Timestamps already committed on :attr:`branch`.
 
-        Returns
-        -------
-        set of datetime
-            **Naive** datetimes understood as UTC — that is what the
-            store's ``time`` coordinate decodes to.  Compare against them
-            with :meth:`has_time` rather than a bare ``in``, which is
-            always ``False`` for the tz-aware datetimes Dagster
-            partitions hand out.
-
         Notes
         -----
         Upstream ``icechunk_existing_times`` swallows every exception and
@@ -275,13 +219,7 @@ class IcechunkStoreResource(ConfigurableResource):
         return icechunk_existing_times(self.repo(), self.branch)
 
     def has_time(self, t: datetime) -> bool:
-        """Whether ``t`` is already committed, tz-aware input included.
-
-        Parameters
-        ----------
-        t : datetime
-            Naive (assumed UTC) or tz-aware; normalised either way.
-        """
+        """Whether ``t`` is already committed, tz-aware input included."""
         return as_naive_utc(t) in self.existing_times()
 
     def set_repo(self, repo: Any) -> None:
@@ -353,10 +291,7 @@ class ModelResource(ConfigurableResource):
         Never loads anything — safe to call in a sensor or a test to
         decide whether real inference is possible.
         """
-        return all(
-            bool(p) and Path(p).exists()
-            for p in (self.student_ckpt, self.raft_ckpt)
-        )
+        return all(bool(p) and Path(p).exists() for p in (self.student_ckpt, self.raft_ckpt))
 
     def _require_ckpt(self, path: str, what: str) -> Path:
         """Validate one checkpoint path, raising a pointed error."""
@@ -367,36 +302,24 @@ class ModelResource(ConfigurableResource):
             )
         p = Path(path)
         if not p.exists():
-            raise FileNotFoundError(
-                f"ModelResource.{what} checkpoint not found: {p}"
-            )
+            raise FileNotFoundError(f"ModelResource.{what} checkpoint not found: {p}")
         return p
 
     def model(self) -> "StudentWindsModel":
-        """Load the student model on first call and cache it.
-
-        Returns
-        -------
-        stereo_winds.student_zeus_model.StudentWindsModel
-            In ``eval()`` mode, mapped onto :attr:`device`.
-        """
+        """Load the student model on first call and cache it."""
         if self._model is None:
             path = self._require_ckpt(self.student_ckpt, "student_ckpt")
             from stereo_winds.student_zeus_model import StudentWindsModel
 
             logger.info("Loading student checkpoint: %s", path)
             self._model = StudentWindsModel.load_from_checkpoint(
-                str(path), map_location=self.device,
+                str(path),
+                map_location=self.device,
             ).eval()
         return self._model
 
     def disparity(self) -> "StereoDisparity":
-        """Load the RAFT disparity engine on first call and cache it.
-
-        Returns
-        -------
-        stereo_winds.disparity.StereoDisparity
-        """
+        """Load the RAFT disparity engine on first call and cache it."""
         if self._disparity is None:
             path = self._require_ckpt(self.raft_ckpt, "raft_ckpt")
             from stereo_winds.disparity import StereoDisparity
@@ -479,17 +402,6 @@ class RunSettingsResource(ConfigurableResource):
         result silently carries ``OperationalConfig``'s own defaults, so
         a ``device="cuda"`` :class:`ModelResource` would yield a config
         saying ``"cpu"`` and inference would quietly run on the CPU.
-
-        Parameters
-        ----------
-        model, paths, store : resource, optional
-            Siblings to take the remaining fields from.
-        **overrides
-            Explicit values, applied last and winning over the siblings.
-
-        Returns
-        -------
-        OperationalConfig
         """
         fields: dict[str, Any] = {
             "satellites": tuple(self.satellites),
