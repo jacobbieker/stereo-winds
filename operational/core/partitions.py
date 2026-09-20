@@ -76,68 +76,25 @@ MINUTES_PER_DAY = 24 * 60
 # Normalisation and validation helpers
 # ---------------------------------------------------------------------------
 
+
 def _as_naive_utc(t: datetime, *, argname: str = "t") -> datetime:
-    """Return ``t`` as a timezone-naive UTC datetime.
-
-    Parameters
-    ----------
-    t : datetime
-        Naive (assumed UTC) or aware timestamp.
-    argname : str, optional
-        Name used in the error message.
-
-    Returns
-    -------
-    datetime
-        Naive UTC equivalent of ``t``.
-
-    Raises
-    ------
-    TypeError
-        If ``t`` is not a :class:`~datetime.datetime`.
-    """
+    """Return ``t`` as a timezone-naive UTC datetime."""
     if not isinstance(t, datetime):
-        raise TypeError(
-            f"{argname} must be a datetime, got {type(t).__name__!r}"
-        )
+        raise TypeError(f"{argname} must be a datetime, got {type(t).__name__!r}")
     if t.tzinfo is None:
         return t
     return t.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 def validate_cadence(cadence_minutes: int) -> int:
-    """Check that a cadence tiles the day exactly.
-
-    Parameters
-    ----------
-    cadence_minutes : int
-        Spacing between consecutive partitions, in minutes.
-
-    Returns
-    -------
-    int
-        ``cadence_minutes`` unchanged, as an ``int``.
-
-    Raises
-    ------
-    ValueError
-        If the cadence is not a positive whole number of minutes, or if
-        it does not divide the 1440-minute day evenly.  A cadence that
-        does not divide the day would make the grid shift from one day
-        to the next, so partition keys would stop lining up with the
-        satellite scan schedule.
-    """
-    if isinstance(cadence_minutes, bool) or not isinstance(
-        cadence_minutes, int
-    ):
+    """Check that a cadence tiles the day exactly."""
+    if isinstance(cadence_minutes, bool) or not isinstance(cadence_minutes, int):
         raise ValueError(
             "cadence_minutes must be a positive integer number of minutes, "
             f"got {cadence_minutes!r}"
         )
     if cadence_minutes <= 0:
-        raise ValueError(
-            "cadence_minutes must be > 0, got " f"{cadence_minutes}"
-        )
+        raise ValueError("cadence_minutes must be > 0, got " f"{cadence_minutes}")
     if MINUTES_PER_DAY % cadence_minutes != 0:
         raise ValueError(
             f"cadence_minutes={cadence_minutes} does not divide the "
@@ -149,21 +106,7 @@ def validate_cadence(cadence_minutes: int) -> int:
 
 
 def is_on_cadence(t: datetime, cadence_minutes: int) -> bool:
-    """Report whether ``t`` lands exactly on the cadence grid.
-
-    Parameters
-    ----------
-    t : datetime
-        Timestamp to test.
-    cadence_minutes : int
-        Cadence defining the grid.
-
-    Returns
-    -------
-    bool
-        True when ``t`` has no sub-minute component and its
-        minutes-since-midnight is a multiple of ``cadence_minutes``.
-    """
+    """Report whether ``t`` lands exactly on the cadence grid."""
     validate_cadence(cadence_minutes)
     naive = _as_naive_utc(t)
     if naive.second or naive.microsecond:
@@ -172,31 +115,8 @@ def is_on_cadence(t: datetime, cadence_minutes: int) -> bool:
     return minutes % cadence_minutes == 0
 
 
-def validate_on_cadence(
-    t: datetime, cadence_minutes: int, *, argname: str = "t"
-) -> datetime:
-    """Return ``t`` as naive UTC, rejecting anything off the grid.
-
-    Parameters
-    ----------
-    t : datetime
-        Timestamp to check.
-    cadence_minutes : int
-        Cadence defining the grid.
-    argname : str, optional
-        Name used in the error message.
-
-    Returns
-    -------
-    datetime
-        Naive UTC ``t``.
-
-    Raises
-    ------
-    ValueError
-        If ``t`` is not on the grid; the message names the expected grid
-        and the nearest grid point at or before ``t``.
-    """
+def validate_on_cadence(t: datetime, cadence_minutes: int, *, argname: str = "t") -> datetime:
+    """Return ``t`` as naive UTC, rejecting anything off the grid."""
     naive = _as_naive_utc(t, argname=argname)
     if not is_on_cadence(naive, cadence_minutes):
         floored = align_to_cadence(naive, cadence_minutes)
@@ -213,31 +133,9 @@ def validate_on_cadence(
 # Key <-> datetime
 # ---------------------------------------------------------------------------
 
+
 def key_for(t: datetime) -> str:
-    """Render a timestamp as a partition key.
-
-    Parameters
-    ----------
-    t : datetime
-        Timestamp on a whole minute.  Naive input is treated as UTC;
-        aware input is converted to UTC.
-
-    Returns
-    -------
-    str
-        The key, e.g. ``"2026-08-01-06:00"``.
-
-    Raises
-    ------
-    ValueError
-        If ``t`` carries seconds or microseconds.  The key format has
-        minute resolution, so such a timestamp could not round-trip.
-
-    Examples
-    --------
-    >>> key_for(datetime(2026, 8, 1, 6, 0))
-    '2026-08-01-06:00'
-    """
+    """Render a timestamp as a partition key."""
     naive = _as_naive_utc(t)
     if naive.second or naive.microsecond:
         raise ValueError(
@@ -249,31 +147,9 @@ def key_for(t: datetime) -> str:
 
 
 def time_for(key: str) -> datetime:
-    """Parse a partition key back into a timestamp.
-
-    Parameters
-    ----------
-    key : str
-        A key in ``%Y-%m-%d-%H:%M`` form.
-
-    Returns
-    -------
-    datetime
-        Naive UTC timestamp.  ``key_for(time_for(k)) == k`` for every
-        well-formed key.
-
-    Raises
-    ------
-    TypeError
-        If ``key`` is not a string.
-    ValueError
-        If ``key`` does not match the expected format; the message shows
-        both the format and an example.
-    """
+    """Parse a partition key back into a timestamp."""
     if not isinstance(key, str):
-        raise TypeError(
-            f"partition key must be a str, got {type(key).__name__!r}"
-        )
+        raise TypeError(f"partition key must be a str, got {type(key).__name__!r}")
     try:
         return datetime.strptime(key, PARTITION_KEY_FORMAT)
     except ValueError as exc:
@@ -287,30 +163,13 @@ def time_for(key: str) -> datetime:
 # Grid arithmetic
 # ---------------------------------------------------------------------------
 
+
 def align_to_cadence(t: datetime, cadence_minutes: int) -> datetime:
     """Floor a timestamp onto the cadence grid.
 
     The grid is anchored at 00:00 UTC each day, which is well defined
     precisely because :func:`validate_cadence` requires the cadence to
     divide the day.
-
-    Parameters
-    ----------
-    t : datetime
-        Timestamp to floor.
-    cadence_minutes : int
-        Cadence defining the grid.
-
-    Returns
-    -------
-    datetime
-        Naive UTC timestamp, the latest grid point at or before ``t``.
-        A timestamp already on the grid is returned unchanged.
-
-    Raises
-    ------
-    ValueError
-        If ``cadence_minutes`` is invalid.
     """
     validate_cadence(cadence_minutes)
     naive = _as_naive_utc(t)
@@ -321,67 +180,19 @@ def align_to_cadence(t: datetime, cadence_minutes: int) -> datetime:
 
 
 def window_for(key: str, cadence_minutes: int) -> tuple[datetime, datetime]:
-    """Return the half-open interval a partition covers.
-
-    Parameters
-    ----------
-    key : str
-        Partition key.
-    cadence_minutes : int
-        Cadence the key belongs to.
-
-    Returns
-    -------
-    tuple of datetime
-        ``(start, end)`` as naive UTC, where ``start`` is the key's own
-        timestamp and ``end`` is one cadence later.  The interval is
-        half-open: ``end`` belongs to the next partition.
-
-    Raises
-    ------
-    ValueError
-        If the key is malformed, the cadence invalid, or the key's
-        timestamp does not sit on the cadence grid.
-    """
+    """Return the half-open interval a partition covers."""
     validate_cadence(cadence_minutes)
     start = validate_on_cadence(time_for(key), cadence_minutes, argname="key")
     return start, start + timedelta(minutes=cadence_minutes)
 
 
-def keys_between(
-    start: datetime, end: datetime, cadence_minutes: int
-) -> list[str]:
-    """List the partition keys covering ``[start, end]``.
-
-    Parameters
-    ----------
-    start, end : datetime
-        Inclusive bounds.  Both must sit on the cadence grid; a bound
-        that does not is a sign of an upstream bug, so it is rejected
-        rather than silently snapped.
-    cadence_minutes : int
-        Cadence defining the grid.
-
-    Returns
-    -------
-    list of str
-        Keys in chronological (equivalently, lexicographic) order,
-        including both endpoints.  ``start == end`` yields one key.
-
-    Raises
-    ------
-    ValueError
-        If ``end`` precedes ``start``, the cadence is invalid, or either
-        bound is off the grid.
-    """
+def keys_between(start: datetime, end: datetime, cadence_minutes: int) -> list[str]:
+    """List the partition keys covering ``[start, end]``."""
     validate_cadence(cadence_minutes)
     start_t = validate_on_cadence(start, cadence_minutes, argname="start")
     end_t = validate_on_cadence(end, cadence_minutes, argname="end")
     if end_t < start_t:
-        raise ValueError(
-            f"end ({end_t.isoformat()}) is before start "
-            f"({start_t.isoformat()})"
-        )
+        raise ValueError(f"end ({end_t.isoformat()}) is before start " f"({start_t.isoformat()})")
     step = timedelta(minutes=cadence_minutes)
     keys: list[str] = []
     current = start_t
@@ -395,30 +206,9 @@ def keys_between(
 # Dagster partitions definition
 # ---------------------------------------------------------------------------
 
+
 def cron_for_cadence(cadence_minutes: int) -> str:
-    """Build the cron schedule expressing a cadence.
-
-    Parameters
-    ----------
-    cadence_minutes : int
-        Cadence defining the grid.
-
-    Returns
-    -------
-    str
-        A five-field cron expression firing exactly on the grid, e.g.
-        ``"0 * * * *"`` for 60 minutes and ``"0 0,6,12,18 * * *"`` for
-        360 minutes.
-
-    Raises
-    ------
-    ValueError
-        If the cadence is invalid, or if it divides the day but is not
-        expressible as a repeating cron schedule.  ``*/N`` restarts every
-        hour, so a sub-hourly cadence must divide 60 (10 and 15 are fine,
-        16 and 45 are not); an hourly-or-longer cadence must be a whole
-        number of hours.
-    """
+    """Build the cron schedule expressing a cadence."""
     validate_cadence(cadence_minutes)
     if cadence_minutes < 60:
         if 60 % cadence_minutes != 0:
@@ -445,44 +235,12 @@ def cron_for_cadence(cadence_minutes: int) -> str:
     return f"0 {hours} * * *"
 
 
-def build_partitions_def(
-    start: datetime, cadence_minutes: int
-) -> "TimeWindowPartitionsDefinition":
+def build_partitions_def(start: datetime, cadence_minutes: int) -> "TimeWindowPartitionsDefinition":
     """Build the Dagster partitions definition for the run cadence.
 
     Dagster is imported lazily here so that the key, grid and cron
     helpers in this module stay usable — and unit-testable — in a
     process that has no Dagster installed.
-
-    Parameters
-    ----------
-    start : datetime
-        First partition's timestamp.  Must sit on the cadence grid so
-        that keys Dagster generates match :func:`key_for` exactly.
-    cadence_minutes : int
-        Spacing between partitions, in minutes.  60 and 360 are the
-        operational cadences; any divisor of 60, or any whole number of
-        hours dividing 1440, works.
-
-    Returns
-    -------
-    dagster.TimeWindowPartitionsDefinition
-        Partitions whose keys are formatted with
-        :data:`PARTITION_KEY_FORMAT`, so they are interchangeable with
-        the output of :func:`key_for`.
-
-    Raises
-    ------
-    ValueError
-        If the cadence is invalid or ``start`` is off the grid.
-
-    Examples
-    --------
-    >>> pd = build_partitions_def(datetime(2026, 8, 1), 360)
-    >>> pd.get_partition_keys(
-    ...     current_time=datetime(2026, 8, 1, 18, 0)
-    ... )[:2]
-    ['2026-08-01-00:00', '2026-08-01-06:00']
     """
     from dagster import TimeWindowPartitionsDefinition
 
@@ -520,9 +278,7 @@ def __getattr__(name: str):
     if name == "OPERATIONAL_PARTITIONS":
         from operational.config import OperationalConfig
 
-        value = build_partitions_def(
-            DEFAULT_START, OperationalConfig.from_env().cadence_minutes)
-        globals()[name] = value          # cache; __getattr__ won't run again
+        value = build_partitions_def(DEFAULT_START, OperationalConfig.from_env().cadence_minutes)
+        globals()[name] = value  # cache; __getattr__ won't run again
         return value
-    raise AttributeError(
-        f"module {__name__!r} has no attribute {name!r}")
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
