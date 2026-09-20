@@ -209,15 +209,17 @@ class TestIdempotence:
         result = publish_mosaic(repo, _mosaic(["goes18", "goes19"]), T0)
         assert result.vocabulary == ("goes18", "goes19")
 
-    def test_skip_existing_false_appends_rather_than_replaces(self, repo):
-        """The escape hatch duplicates the timestep; icechunk cannot replace."""
+    def test_skip_existing_false_replaces_rather_than_duplicating(self, repo):
+        """Writing anyway overwrites the timestep; it never doubles it."""
         publish_mosaic(repo, _mosaic(["goes19"], value=1.0), T0)
         result = publish_mosaic(repo, _mosaic(["goes19"], value=2.0), T0,
                                 skip_existing=False)
         assert result.written is True
+        assert result.action == "replaced"
         stored = _stored(repo)
-        assert stored.sizes["time"] == 2
-        assert _times(stored) == [T0, T0]
+        assert stored.sizes["time"] == 1
+        assert _times(stored) == [T0]
+        assert float(stored["u_wind"].values[0].flat[0]) == 2.0
 
     def test_an_aware_timestamp_matches_what_the_store_holds(self, repo):
         """Regression: an orchestrator's tz-aware UTC never compared equal."""
@@ -342,3 +344,83 @@ class TestSharedVocabulary:
     def test_seeding_none_reads_the_store(self, repo):
         publish_mosaic(repo, _mosaic(["goes18", "goes19"]), T0)
         assert seed_vocabulary(repo, None) == ["goes18", "goes19"]
+
+
+class TestRepairingADegradedTimestep:
+    """A resumed satellite must be able to correct what was published."""
+
+    def test_a_mosaic_that_adds_a_satellite_replaces_the_stored_one(self, repo):
+        """The whole point of resuming one satellite at a time."""
+        vocabulary: list[str] = []
+        degraded = publish_mosaic(repo, _mosaic(["goes18", "goes19"]), T0,
+                                  vocabulary=vocabulary)
+        assert degraded.action == "created"
+
+        repaired = publish_mosaic(
+            repo, _mosaic(["goes18", "goes19", "gk2a"]), T0,
+            vocabulary=vocabulary)
+        assert repaired.written is True
+        assert repaired.action == "replaced"
+
+        stored = _stored(repo)
+        assert stored.sizes["time"] == 1, "a repair must not add a timestep"
+        assert set(str(stored["satellites_contributing"].values[0]).split(",")) \
+            == {"goes18", "goes19", "gk2a"}
+
+    def test_a_mosaic_that_adds_nothing_is_still_skipped(self, repo):
+        """Ordinary re-runs must stay no-ops."""
+        vocabulary: list[str] = []
+        publish_mosaic(repo, _mosaic(["goes18", "goes19"]), T0,
+                       vocabulary=vocabulary)
+        again = publish_mosaic(repo, _mosaic(["goes18", "goes19"]), T0,
+                               vocabulary=vocabulary)
+        assert again.written is False
+        assert again.action == "skipped"
+        assert _stored(repo).sizes["time"] == 1
+
+    def test_a_mosaic_with_fewer_satellites_does_not_overwrite_a_better_one(
+            self, repo):
+        """A later outage must not undo a complete timestep."""
+        vocabulary: list[str] = []
+        publish_mosaic(repo, _mosaic(["goes18", "goes19", "gk2a"]), T0,
+                       vocabulary=vocabulary)
+        worse = publish_mosaic(repo, _mosaic(["goes18"]), T0,
+                               vocabulary=vocabulary)
+        assert worse.written is False
+        stored = _stored(repo)
+        assert set(str(stored["satellites_contributing"].values[0]).split(",")) \
+            == {"goes18", "goes19", "gk2a"}
+
+    def test_repair_can_be_turned_off(self, repo):
+        vocabulary: list[str] = []
+        publish_mosaic(repo, _mosaic(["goes18"]), T0, vocabulary=vocabulary)
+        result = publish_mosaic(repo, _mosaic(["goes18", "gk2a"]), T0,
+                                vocabulary=vocabulary, repair_improved=False)
+        assert result.written is False
+        assert result.action == "skipped"
+
+    def test_replace_existing_forces_a_rewrite_that_adds_nothing(self, repo):
+        vocabulary: list[str] = []
+        publish_mosaic(repo, _mosaic(["goes18"], value=1.0), T0,
+                       vocabulary=vocabulary)
+        result = publish_mosaic(repo, _mosaic(["goes18"], value=5.0), T0,
+                                vocabulary=vocabulary, replace_existing=True)
+        assert result.action == "replaced"
+        stored = _stored(repo)
+        assert stored.sizes["time"] == 1
+        assert float(stored["u_wind"].values[0].flat[0]) == 5.0
+
+    def test_a_repair_leaves_later_timesteps_alone(self, repo):
+        vocabulary: list[str] = []
+        publish_mosaic(repo, _mosaic(["goes18"], value=1.0), T0,
+                       vocabulary=vocabulary)
+        later = T0 + timedelta(hours=6)
+        publish_mosaic(repo, _mosaic(["goes18", "goes19"], value=2.0), later,
+                       vocabulary=vocabulary)
+        publish_mosaic(repo, _mosaic(["goes18", "gk2a"], value=9.0), T0,
+                       vocabulary=vocabulary)
+
+        stored = _stored(repo)
+        assert _times(stored) == [T0, later]
+        assert float(stored["u_wind"].values[0].flat[0]) == 9.0
+        assert float(stored["u_wind"].values[1].flat[0]) == 2.0

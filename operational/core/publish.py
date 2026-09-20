@@ -82,6 +82,11 @@ class PublishResult:
         this is a copy for logging and assertions.
     branch
         Branch the commit went to.
+    action
+        What the store did: ``"created"``, ``"appended"``,
+        ``"replaced"`` or ``"skipped"``.  ``"replaced"`` means an
+        existing timestep was repaired in place rather than a new one
+        added, which is what a resumed satellite produces.
     """
 
     timestamp: datetime
@@ -89,6 +94,42 @@ class PublishResult:
     skipped_reason: str | None = None
     vocabulary: tuple[str, ...] = field(default=())
     branch: str = "main"
+    action: str = "appended"
+
+
+def stored_satellites(repo, t0: datetime, branch: str = "main") -> set[str] | None:
+    """Satellites behind the stored mosaic at ``t0``.
+
+    Returns None when the store cannot say -- it has no dataset, no such
+    timestamp, or it predates the per-timestep ``satellites_contributing``
+    variable.  None means "do not compare", never "nothing contributed".
+    """
+    try:
+        ds = xr.open_zarr(repo.readonly_session(branch).store, consolidated=False)
+    except Exception:
+        return None
+    if "time" not in ds.coords or "satellites_contributing" not in ds:
+        return None
+    import numpy as np
+
+    times = np.asarray(ds["time"].values, "datetime64[ns]")
+    hits = np.flatnonzero(times == np.datetime64(as_store_time(t0), "ns"))
+    if not hits.size:
+        return None
+    value = str(ds["satellites_contributing"].values[int(hits[0])])
+    return {part for part in value.split(",") if part}
+
+
+def mosaic_satellite_set(ds_global: xr.Dataset) -> set[str]:
+    """Satellites contributing to a mosaic about to be published."""
+    value = ds_global.attrs.get("satellites_contributing")
+    if value is None:
+        value = ds_global.attrs.get("satellites")
+    if value is None:
+        return set()
+    if isinstance(value, (list, tuple)):
+        return {str(v) for v in value if str(v)}
+    return {part for part in str(value).split(",") if part}
 
 
 def as_store_time(t0: datetime) -> datetime:
@@ -253,6 +294,8 @@ def publish_mosaic(
     vocabulary: list[str] | None = None,
     skip_existing: bool = True,
     allow_out_of_order: bool = False,
+    repair_improved: bool = True,
+    replace_existing: bool = False,
 ) -> PublishResult:
     """Append one global mosaic to the icechunk store as its own commit.
 
@@ -277,16 +320,28 @@ def publish_mosaic(
         None seeds a fresh one from the store.
     skip_existing
         Skip a timestamp the store already holds instead of writing it
-        again.  This is what makes a re-run safe.  Setting it False does
-        **not** replace the stored mosaic — icechunk is appended to, so
-        the timestamp ends up in ``time`` twice and ``sel(time=t0)``
-        returns both.  It is an escape hatch, not an overwrite.
+        again.  This is what makes a re-run safe.  Set it False to write
+        regardless, which replaces the stored timestep -- a timestamp
+        never appears twice along ``time``.
     allow_out_of_order
         Permit a ``t0`` older than the store's latest timestamp.  The
         append leaves ``time`` unsorted, and an unsorted index makes
         range selections return nothing instead of raising, so this is
         refused by default.  Backfills should be published in
         chronological order.
+    repair_improved
+        Replace a stored timestep when this mosaic covers satellites it
+        does not.  This is what a resume is for: the schedule may have
+        published a degraded mosaic while a satellite was down, and once
+        that satellite is retrieved the timestep should be corrected
+        rather than left permanently short.  A mosaic that adds nothing
+        is still skipped, so ordinary re-runs stay no-ops.  Requires a
+        store new enough to record ``satellites_contributing``; without
+        it there is nothing to compare and the timestep is skipped.
+    replace_existing
+        Replace the stored timestep whether or not it improves on what
+        is there.  For deliberate republication -- a corrected model, a
+        changed grid -- rather than routine operation.
 
     Returns
     -------
@@ -306,19 +361,36 @@ def publish_mosaic(
     vocabulary = seed_vocabulary(repo, vocabulary, branch)
     stored_times = icechunk_existing_times(repo, branch)
 
+    replace = False
     if t0 in stored_times:
-        if skip_existing:
+        already = stored_satellites(repo, t0, branch)
+        incoming = mosaic_satellite_set(ds_global)
+        gained = incoming - already if already is not None else set()
+
+        if replace_existing:
+            replace = True
+            logger.info("Replacing %s on request", time_tag(t0))
+        elif repair_improved and gained:
+            replace = True
+            logger.info(
+                "Repairing %s: this mosaic adds %s to the %s already stored",
+                time_tag(t0), ", ".join(sorted(gained)),
+                ", ".join(sorted(already)) or "(none)")
+        elif skip_existing:
             reason = f"{time_tag(t0)} is already in the store"
+            if already is None and repair_improved:
+                reason += " (it does not record which satellites it used)"
             logger.info("Skipping publish: %s", reason)
             return PublishResult(
                 timestamp=t0, written=False, skipped_reason=reason,
-                vocabulary=tuple(vocabulary), branch=branch,
+                vocabulary=tuple(vocabulary), branch=branch, action="skipped",
             )
-        logger.warning(
-            "Publishing %s again with skip_existing=False — it will appear "
-            "twice along time; icechunk appends, it does not replace",
-            time_tag(t0))
-    elif stored_times and t0 < max(stored_times) and not allow_out_of_order:
+        else:
+            replace = True
+            logger.info(
+                "Publishing %s again with skip_existing=False; replacing the "
+                "stored timestep", time_tag(t0))
+    elif stored_times and t0 < max(stored_times) and not allow_out_of_order:  # noqa: E501
         raise ValueError(
             f"Refusing to publish {time_tag(t0)}: the store already holds "
             f"{time_tag(max(stored_times))} and mosaics are appended, not "
@@ -326,13 +398,14 @@ def publish_mosaic(
             f"Publish in chronological order, or pass allow_out_of_order=True."
         )
 
-    write_mosaic_to_icechunk(
+    action = write_mosaic_to_icechunk(
         repo, ds_global, t0, branch=branch, chunk=chunk, vocabulary=vocabulary,
+        replace=replace,
     )
     if vocabulary and "source_satellite_index" in ds_global:
         _check_stored_vocabulary(repo, branch, vocabulary)
     logger.info("Published %s (vocabulary: %s)", time_tag(t0), vocabulary)
     return PublishResult(
         timestamp=t0, written=True, skipped_reason=None,
-        vocabulary=tuple(vocabulary), branch=branch,
+        vocabulary=tuple(vocabulary), branch=branch, action=action or "appended",
     )
