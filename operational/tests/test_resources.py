@@ -87,12 +87,15 @@ class TestImportLight:
         env = {**os.environ, "PYTHONPATH": str(repo_root)}
         out = subprocess.run(
             [sys.executable, "-c", code],
-            capture_output=True, text=True, env=env, cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(repo_root),
         )
         assert out.returncode == 0, out.stderr
-        assert out.stdout.strip() == "", (
-            f"importing operational.resources pulled in {out.stdout.strip()}"
-        )
+        assert (
+            out.stdout.strip() == ""
+        ), f"importing operational.resources pulled in {out.stdout.strip()}"
 
 
 class TestPathsResource:
@@ -109,9 +112,7 @@ class TestPathsResource:
         assert res.sat_path("goes18", T0) == sat_nc_path(tmp_path, "goes18", T0)
         assert res.mosaic_path(T0) == global_nc_path(tmp_path, T0)
         # Layout: per-day directory, canonical time tag.
-        assert res.sat_path("goes18", T0).name == (
-            "student_amv_goes18_20240115T1200.nc"
-        )
+        assert res.sat_path("goes18", T0).name == ("student_amv_goes18_20240115T1200.nc")
         assert res.mosaic_path(T0).name == "student_amv_global_20240115T1200.nc"
         assert res.mosaic_path(T0).parent.name == "20240115"
 
@@ -321,15 +322,15 @@ class TestRunSettingsResource:
         assert tuple(res.flow_bands) == cfg.flow_bands
         assert tuple(res.rad_bands) == cfg.rad_bands
         assert res.cadence_minutes == cfg.cadence_minutes
-        assert res.availability_tolerance_minutes == (
-            cfg.availability_tolerance_minutes
-        )
+        assert res.availability_tolerance_minutes == (cfg.availability_tolerance_minutes)
         assert res.resolution_m == cfg.resolution_m
         assert res.skip_existing is True
 
     def test_overrides_are_honoured(self):
         res = RunSettingsResource(
-            satellites=["goes19"], cadence_minutes=10, skip_existing=False,
+            satellites=["goes19"],
+            cadence_minutes=10,
+            skip_existing=False,
         )
         assert res.satellites == ["goes19"]
         assert res.cadence_minutes == 10
@@ -434,16 +435,16 @@ class TestResourcesInsideDagster:
         res.set_model("fake-model")
 
         result = materialize(
-            [uses_model], resources={"model": res}, raise_on_error=False,
+            [uses_model],
+            resources={"model": res},
+            raise_on_error=False,
         )
         assert not result.success
         # It must fail for the documented reason — the lazy load running
         # against a checkpoint that is not there — not for some unrelated
         # config or schema error that would keep this test green while
         # the behaviour it pins changed underneath it.
-        failures = result.filter_events(
-            lambda e: e.event_type_value == "STEP_FAILURE"
-        )
+        failures = result.filter_events(lambda e: e.event_type_value == "STEP_FAILURE")
         assert failures
         info = failures[0].step_failure_data.error
         assert "FileNotFoundError" in str(info)
@@ -484,7 +485,12 @@ class TestNaiveUtc:
     def test_offset_is_converted_not_truncated(self):
         # 07:00 at UTC-5 is 12:00 UTC.
         aware = datetime(
-            2024, 1, 15, 7, 0, tzinfo=timezone(timedelta(hours=-5)),
+            2024,
+            1,
+            15,
+            7,
+            0,
+            tzinfo=timezone(timedelta(hours=-5)),
         )
         assert as_naive_utc(aware) == T0
 
@@ -492,7 +498,7 @@ class TestNaiveUtc:
         """The trap this helper exists to remove."""
         stored = {T0}
         aware = T0.replace(tzinfo=timezone.utc)
-        assert aware not in stored          # the bug
+        assert aware not in stored  # the bug
         assert as_naive_utc(aware) in stored  # the fix
 
     def test_has_time_accepts_aware_and_naive(self, monkeypatch):
@@ -506,16 +512,12 @@ class TestNaiveUtc:
 
         assert res.has_time(T0)
         assert res.has_time(T0.replace(tzinfo=timezone.utc))
-        assert res.has_time(
-            datetime(2024, 1, 15, 7, 0, tzinfo=timezone(timedelta(hours=-5)))
-        )
+        assert res.has_time(datetime(2024, 1, 15, 7, 0, tzinfo=timezone(timedelta(hours=-5))))
         assert not res.has_time(datetime(2024, 1, 15, 13, 0))
 
     def test_paths_are_tz_insensitive(self, tmp_path):
         res = PathsResource(output_dir=str(tmp_path))
-        assert res.mosaic_path(T0) == res.mosaic_path(
-            T0.replace(tzinfo=timezone.utc)
-        )
+        assert res.mosaic_path(T0) == res.mosaic_path(T0.replace(tzinfo=timezone.utc))
 
 
 class TestToConfigWiring:
@@ -540,7 +542,8 @@ class TestToConfigWiring:
     def test_explicit_overrides_beat_the_siblings(self):
         settings = RunSettingsResource()
         cfg = settings.to_config(
-            model=ModelResource(device="cuda"), device="cpu",
+            model=ModelResource(device="cuda"),
+            device="cpu",
         )
         assert cfg.device == "cpu"
 
