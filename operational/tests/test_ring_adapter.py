@@ -70,8 +70,7 @@ class TestLoadRing:
         assert sys.modules[ring.RING_MODULE_NAME] is ring.load_ring()
 
     def test_does_not_collide_with_the_names_other_tests_use(self):
-        for other in ("infer_student_global_ring", "ring_prefetch",
-                      "write_mosaics", "ring_msg"):
+        for other in ("infer_student_global_ring", "ring_prefetch", "write_mosaics", "ring_msg"):
             assert other != ring.RING_MODULE_NAME
             assert sys.modules.get(other) is not ring.load_ring()
 
@@ -81,7 +80,9 @@ class TestLoadRing:
     def test_warm_cache_does_not_re_execute(self, monkeypatch):
         calls = []
         monkeypatch.setattr(
-            ring, "_exec_ring_module", lambda: calls.append(1),
+            ring,
+            "_exec_ring_module",
+            lambda: calls.append(1),
         )
         ring.load_ring()
         ring.load_ring()
@@ -145,8 +146,7 @@ class TestLoadRing:
         with pytest.raises(FileNotFoundError, match="gone.py"):
             ring.load_ring()
 
-    def test_failed_exec_leaves_no_half_built_module(self, tmp_path,
-                                                     monkeypatch):
+    def test_failed_exec_leaves_no_half_built_module(self, tmp_path, monkeypatch):
         broken = tmp_path / "broken_ring.py"
         broken.write_text("raise RuntimeError('boom')\n")
         monkeypatch.setattr(ring, "RING_SCRIPT", broken)
@@ -186,11 +186,20 @@ class TestReexports:
     def test_listed_in_dunder_all(self, name):
         assert name in ring.__all__
 
-    @pytest.mark.parametrize("name", [
-        "infer_satellite", "quality_attrs", "satellite_available_times",
-        "availability_band", "scan_interval", "time_tag", "sat_nc_path",
-        "global_nc_path", "filter_to_common_times",
-    ])
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "infer_satellite",
+            "quality_attrs",
+            "satellite_available_times",
+            "availability_band",
+            "scan_interval",
+            "time_tag",
+            "sat_nc_path",
+            "global_nc_path",
+            "filter_to_common_times",
+        ],
+    )
     def test_functions_are_callable(self, name):
         assert callable(getattr(ring, name))
 
@@ -211,13 +220,23 @@ class TestConstants:
 
     def test_ring_satellites_contents(self):
         assert ring.RING_SATELLITES == [
-            "goes18", "goes19", "mtg-i1", "msg-iodc", "gk2a", "himawari9",
+            "goes18",
+            "goes19",
+            "mtg-i1",
+            "msg-iodc",
+            "gk2a",
+            "himawari9",
         ]
 
     def test_output_vars_contents(self):
         assert ring.OUTPUT_VARS == [
-            "u_wind", "v_wind", "cloud_top_height",
-            "quality_flag", "sigma_u", "sigma_v", "sigma_h",
+            "u_wind",
+            "v_wind",
+            "cloud_top_height",
+            "quality_flag",
+            "sigma_u",
+            "sigma_v",
+            "sigma_h",
         ]
 
     def test_dt_minutes(self):
@@ -305,6 +324,4 @@ class TestScriptOverride:
         assert ring.RING_SCRIPT_ENV == "STEREO_WINDS_RING_SCRIPT"
 
     def test_default_is_the_checkout_script(self):
-        assert ring.RING_SCRIPT == (
-            ring.REPO_ROOT / "scripts" / "infer_student_global_ring.py"
-        )
+        assert ring.RING_SCRIPT == (ring.REPO_ROOT / "scripts" / "infer_student_global_ring.py")
