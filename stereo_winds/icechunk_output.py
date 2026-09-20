@@ -149,10 +149,12 @@ def _mosaic_with_time(ds_global: xr.Dataset, t0: datetime) -> xr.Dataset:
     ds = ds_global.expand_dims(time=[np.datetime64(t0, "ns")])
     # Attributes that vary per timestamp belong on a variable, not the
     # store; keep only what is invariant across the whole time series.
-    per_timestep = {k: ds_global.attrs[k] for k in _PER_TIMESTEP_ATTRS
-                    if k in ds_global.attrs}
-    ds.attrs = {k: v for k, v in ds_global.attrs.items()
-                if k not in ("time", "satellites") and k not in per_timestep}
+    per_timestep = {k: ds_global.attrs[k] for k in _PER_TIMESTEP_ATTRS if k in ds_global.attrs}
+    ds.attrs = {
+        k: v
+        for k, v in ds_global.attrs.items()
+        if k not in ("time", "satellites") and k not in per_timestep
+    }
     ds.attrs["satellites"] = _satellites_attr(ds_global.attrs.get("satellites"))
     for name, value in per_timestep.items():
         ds[name] = ("time", _timestep_value(value))
@@ -160,8 +162,7 @@ def _mosaic_with_time(ds_global: xr.Dataset, t0: datetime) -> xr.Dataset:
     # the group attribute above is the store-wide vocabulary.  Only
     # derive it when the mosaic did not already state one.
     if "satellites_contributing" not in ds:
-        ds["satellites_contributing"] = (
-            "time", _timestep_value(ds.attrs["satellites"]))
+        ds["satellites_contributing"] = ("time", _timestep_value(ds.attrs["satellites"]))
 
     # Encoding picked up from a NetCDF source (chunking, compression,
     # fill values) does not apply to the zarr we are writing.
@@ -185,7 +186,7 @@ def _satellites_attr(value) -> str:
 
             try:
                 parsed = ast.literal_eval(text)
-            except (ValueError, SyntaxError):
+            except ValueError, SyntaxError:
                 return text
             if isinstance(parsed, (list, tuple)):
                 return ",".join(str(v) for v in parsed)
@@ -219,7 +220,8 @@ def mosaic_satellites(ds: xr.Dataset) -> list[str]:
 
 
 def align_source_codes(
-    ds: xr.Dataset, vocabulary: list[str],
+    ds: xr.Dataset,
+    vocabulary: list[str],
 ) -> xr.Dataset:
     """Remap ``source_satellite_index`` onto a vocabulary shared by the store.
 
@@ -245,20 +247,22 @@ def align_source_codes(
         lookup[code] = vocabulary.index(name)
 
     codes = ds["source_satellite_index"].values
-    remapped = np.where(codes < 0, np.int8(NO_SOURCE),
-                        lookup[np.clip(codes, 0, len(names))])
+    remapped = np.where(codes < 0, np.int8(NO_SOURCE), lookup[np.clip(codes, 0, len(names))])
 
     ds = ds.copy()
     ds["source_satellite_index"] = (
-        ds["source_satellite_index"].dims, remapped.astype(np.int8),
+        ds["source_satellite_index"].dims,
+        remapped.astype(np.int8),
     )
-    ds["source_satellite_index"].attrs.update({
-        "long_name": "index into the satellites attribute of the satellite "
-                     "that won each cell",
-        "flag_values": list(range(len(vocabulary))),
-        "flag_meanings": " ".join(vocabulary),
-        "no_source_index": NO_SOURCE,
-    })
+    ds["source_satellite_index"].attrs.update(
+        {
+            "long_name": "index into the satellites attribute of the satellite "
+            "that won each cell",
+            "flag_values": list(range(len(vocabulary))),
+            "flag_meanings": " ".join(vocabulary),
+            "no_source_index": NO_SOURCE,
+        }
+    )
     return ds
 
 
@@ -272,8 +276,10 @@ def _update_store_vocabulary(session, vocabulary: list[str]) -> None:
         array.attrs["flag_values"] = list(range(len(vocabulary)))
         array.attrs["flag_meanings"] = " ".join(vocabulary)
     except Exception:  # pragma: no cover - depends on zarr internals
-        logger.exception("Could not update the stored satellite vocabulary; "
-                         "source_satellite_index may under-describe itself")
+        logger.exception(
+            "Could not update the stored satellite vocabulary; "
+            "source_satellite_index may under-describe itself"
+        )
 
 
 def store_vocabulary(repo, branch: str = "main") -> list[str]:
@@ -322,8 +328,9 @@ def _align_for_append(ds: xr.Dataset, existing: set[str]) -> xr.Dataset:
     extra = [n for n in ds.data_vars if n in per_timestep and n not in existing]
     if extra:
         logger.info(
-            "Store predates the per-timestep quality variables; "
-            "dropping %s from this append", ", ".join(sorted(extra)))
+            "Store predates the per-timestep quality variables; " "dropping %s from this append",
+            ", ".join(sorted(extra)),
+        )
         ds = ds.drop_vars(extra)
     absent = [n for n in existing & per_timestep if n not in ds]
     for name in absent:
@@ -353,11 +360,6 @@ def write_mosaic_to_icechunk(
     mosaic: appending would duplicate the timestamp, and skipping would
     leave the store permanently short of a satellite that has since
     been retrieved.
-
-    Returns
-    -------
-    str
-        ``"created"``, ``"appended"``, ``"replaced"`` or ``"skipped"``.
     """
     if vocabulary is None:
         vocabulary = store_vocabulary(repo, branch)
@@ -369,22 +371,20 @@ def write_mosaic_to_icechunk(
     existing_at = _time_index(session, t0) if _store_has_dataset(session) else None
     if existing_at is not None:
         if not replace:
-            logger.info("%s already in the store; leaving it alone",
-                        time_tag(t0))
+            logger.info("%s already in the store; leaving it alone", time_tag(t0))
             return "skipped"
         # Only variables on the time axis take part in a region write;
         # the grid coordinates are shared by every timestep and are
         # already in the store.
-        region_ds = ds.drop_vars(
-            [n for n in ds.variables if "time" not in ds[n].dims])
+        region_ds = ds.drop_vars([n for n in ds.variables if "time" not in ds[n].dims])
         region_ds = region_ds.drop_vars("time")
         region_ds = _align_for_append(region_ds, _store_variables(session))
-        region_ds.to_zarr(session.store, consolidated=False,
-                          region={"time": slice(existing_at, existing_at + 1)})
+        region_ds.to_zarr(
+            session.store, consolidated=False, region={"time": slice(existing_at, existing_at + 1)}
+        )
         if vocabulary and "source_satellite_index" in region_ds:
             _update_store_vocabulary(session, vocabulary)
-        commit = session.commit(
-            f"student AMV global mosaic {time_tag(t0)} (replaced)")
+        commit = session.commit(f"student AMV global mosaic {time_tag(t0)} (replaced)")
         logger.info("Replaced %s in icechunk (%s)", time_tag(t0), commit)
         return "replaced"
 
@@ -398,14 +398,12 @@ def write_mosaic_to_icechunk(
             encoding[name] = {
                 "chunks": (1, min(chunk, var.shape[1]), min(chunk, var.shape[2])),
             }
-        ds.to_zarr(session.store, mode="w", consolidated=False,
-                   zarr_format=3, encoding=encoding)
+        ds.to_zarr(session.store, mode="w", consolidated=False, zarr_format=3, encoding=encoding)
         logger.info("Created icechunk dataset (chunks %d x %d)", chunk, chunk)
         outcome = "created"
     else:
         ds = _align_for_append(ds, _store_variables(session))
-        ds.to_zarr(session.store, mode="a-", append_dim="time",
-                   consolidated=False)
+        ds.to_zarr(session.store, mode="a-", append_dim="time", consolidated=False)
         outcome = "appended"
 
     if vocabulary and "source_satellite_index" in ds:
