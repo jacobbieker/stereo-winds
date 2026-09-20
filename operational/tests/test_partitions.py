@@ -110,8 +110,7 @@ class TestLexicographicOrdering:
     def test_sorted_keys_match_sorted_times(self, cadence):
         start = datetime(2025, 12, 30, 0, 0)
         times = [
-            start + timedelta(minutes=cadence * i)
-            for i in range(MINUTES_PER_DAY * 4 // cadence)
+            start + timedelta(minutes=cadence * i) for i in range(MINUTES_PER_DAY * 4 // cadence)
         ]
         shuffled = times[::7] + times[::-3] + times
         keys = [key_for(t) for t in shuffled]
@@ -127,9 +126,7 @@ class TestLexicographicOrdering:
             assert key_for(earlier) < key_for(later)
 
     def test_keys_between_is_already_sorted(self):
-        keys = keys_between(
-            datetime(2025, 12, 31, 12, 0), datetime(2026, 1, 1, 12, 0), 60
-        )
+        keys = keys_between(datetime(2025, 12, 31, 12, 0), datetime(2026, 1, 1, 12, 0), 60)
         assert keys == sorted(keys)
 
 
@@ -137,17 +134,13 @@ class TestKeysBetween:
     """Inclusive on both ends when the bounds land on the grid."""
 
     def test_hourly_over_a_day_is_inclusive(self):
-        keys = keys_between(
-            datetime(2026, 8, 1, 0, 0), datetime(2026, 8, 2, 0, 0), 60
-        )
+        keys = keys_between(datetime(2026, 8, 1, 0, 0), datetime(2026, 8, 2, 0, 0), 60)
         assert len(keys) == 25
         assert keys[0] == "2026-08-01-00:00"
         assert keys[-1] == "2026-08-02-00:00"
 
     def test_six_hourly_over_a_day_is_inclusive(self):
-        keys = keys_between(
-            datetime(2026, 8, 1, 0, 0), datetime(2026, 8, 2, 0, 0), 360
-        )
+        keys = keys_between(datetime(2026, 8, 1, 0, 0), datetime(2026, 8, 2, 0, 0), 360)
         assert keys == [
             "2026-08-01-00:00",
             "2026-08-01-06:00",
@@ -158,9 +151,7 @@ class TestKeysBetween:
 
     @pytest.mark.parametrize("cadence", [10, 15, 30, 60, 180, 360])
     def test_count_matches_cadence(self, cadence):
-        keys = keys_between(
-            datetime(2026, 8, 1, 0, 0), datetime(2026, 8, 2, 0, 0), cadence
-        )
+        keys = keys_between(datetime(2026, 8, 1, 0, 0), datetime(2026, 8, 2, 0, 0), cadence)
         assert len(keys) == MINUTES_PER_DAY // cadence + 1
 
     def test_single_point_range_yields_one_key(self):
@@ -169,21 +160,15 @@ class TestKeysBetween:
 
     def test_reversed_range_raises(self):
         with pytest.raises(ValueError, match="is before start"):
-            keys_between(
-                datetime(2026, 8, 1, 12, 0), datetime(2026, 8, 1, 0, 0), 60
-            )
+            keys_between(datetime(2026, 8, 1, 12, 0), datetime(2026, 8, 1, 0, 0), 60)
 
     def test_off_grid_start_raises_naming_the_grid(self):
         with pytest.raises(ValueError, match="start=.*not on the 360-minute"):
-            keys_between(
-                datetime(2026, 8, 1, 1, 0), datetime(2026, 8, 1, 18, 0), 360
-            )
+            keys_between(datetime(2026, 8, 1, 1, 0), datetime(2026, 8, 1, 18, 0), 360)
 
     def test_off_grid_end_raises(self):
         with pytest.raises(ValueError, match="end=.*not on the 360-minute"):
-            keys_between(
-                datetime(2026, 8, 1, 0, 0), datetime(2026, 8, 1, 17, 0), 360
-            )
+            keys_between(datetime(2026, 8, 1, 0, 0), datetime(2026, 8, 1, 17, 0), 360)
 
     def test_bounds_may_be_timezone_aware(self):
         tz = timezone(timedelta(hours=-5))
@@ -276,9 +261,7 @@ class TestAlignToCadence:
         assert align_to_cadence(aware, 360) == datetime(2026, 8, 1, 6, 0)
 
     def test_does_not_cross_midnight_backwards(self):
-        assert align_to_cadence(datetime(2026, 8, 1, 0, 5), 360) == datetime(
-            2026, 8, 1, 0, 0
-        )
+        assert align_to_cadence(datetime(2026, 8, 1, 0, 5), 360) == datetime(2026, 8, 1, 0, 0)
 
 
 class TestCadenceValidation:
@@ -307,9 +290,7 @@ class TestCadenceValidation:
         "func",
         [
             lambda c: align_to_cadence(datetime(2026, 8, 1), c),
-            lambda c: keys_between(
-                datetime(2026, 8, 1), datetime(2026, 8, 2), c
-            ),
+            lambda c: keys_between(datetime(2026, 8, 1), datetime(2026, 8, 2), c),
             lambda c: window_for("2026-08-01-00:00", c),
             lambda c: build_partitions_def(datetime(2026, 8, 1), c),
             lambda c: is_on_cadence(datetime(2026, 8, 1), c),
@@ -384,9 +365,7 @@ class TestWindowFor:
         assert key_for(start) == key
 
     def test_windows_tile_without_gaps_or_overlap(self):
-        keys = keys_between(
-            datetime(2026, 8, 1), datetime(2026, 8, 1, 18, 0), 360
-        )
+        keys = keys_between(datetime(2026, 8, 1), datetime(2026, 8, 1, 18, 0), 360)
         windows = [window_for(k, 360) for k in keys]
         for (_, end), (next_start, _) in zip(windows, windows[1:]):
             assert end == next_start
@@ -439,9 +418,7 @@ class TestBuildPartitionsDef:
 
     def test_hourly_partition_keys(self):
         pdef = build_partitions_def(datetime(2026, 8, 1), 60)
-        keys = pdef.get_partition_keys(
-            current_time=datetime(2026, 8, 1, 5, 0, tzinfo=timezone.utc)
-        )
+        keys = pdef.get_partition_keys(current_time=datetime(2026, 8, 1, 5, 0, tzinfo=timezone.utc))
         assert keys == [
             "2026-08-01-00:00",
             "2026-08-01-01:00",
@@ -452,9 +429,7 @@ class TestBuildPartitionsDef:
 
     def test_six_hourly_partition_keys(self):
         pdef = build_partitions_def(datetime(2026, 8, 1), 360)
-        keys = pdef.get_partition_keys(
-            current_time=datetime(2026, 8, 2, 0, 0, tzinfo=timezone.utc)
-        )
+        keys = pdef.get_partition_keys(current_time=datetime(2026, 8, 2, 0, 0, tzinfo=timezone.utc))
         assert keys == [
             "2026-08-01-00:00",
             "2026-08-01-06:00",
@@ -467,9 +442,7 @@ class TestBuildPartitionsDef:
         start = datetime(2026, 8, 1)
         end = datetime(2026, 8, 2)
         pdef = build_partitions_def(start, cadence)
-        dagster_keys = pdef.get_partition_keys(
-            current_time=end.replace(tzinfo=timezone.utc)
-        )
+        dagster_keys = pdef.get_partition_keys(current_time=end.replace(tzinfo=timezone.utc))
         # Dagster's listing is half-open on the right; ours is inclusive.
         assert dagster_keys == keys_between(start, end, cadence)[:-1]
 
@@ -485,9 +458,7 @@ class TestBuildPartitionsDef:
 
     def test_keys_round_trip_through_time_for(self):
         pdef = build_partitions_def(datetime(2026, 8, 1), 360)
-        keys = pdef.get_partition_keys(
-            current_time=datetime(2026, 8, 3, 0, 0, tzinfo=timezone.utc)
-        )
+        keys = pdef.get_partition_keys(current_time=datetime(2026, 8, 3, 0, 0, tzinfo=timezone.utc))
         assert [key_for(time_for(k)) for k in keys] == keys
 
     def test_off_grid_start_raises(self):
@@ -495,9 +466,7 @@ class TestBuildPartitionsDef:
             build_partitions_def(datetime(2026, 8, 1, 1, 0), 360)
 
     def test_aware_start_accepted(self):
-        pdef = build_partitions_def(
-            datetime(2026, 8, 1, tzinfo=timezone.utc), 360
-        )
+        pdef = build_partitions_def(datetime(2026, 8, 1, tzinfo=timezone.utc), 360)
         keys = pdef.get_partition_keys(
             current_time=datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
         )
