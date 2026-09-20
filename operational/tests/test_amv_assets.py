@@ -77,7 +77,9 @@ def resources(tmp_path: Path) -> dict[str, object]:
     return {
         "paths": PathsResource(output_dir=str(tmp_path / "out")),
         "model": FakeModelResource(
-            student_ckpt="student.ckpt", raft_ckpt="raft.ckpt", device="cpu",
+            student_ckpt="student.ckpt",
+            raft_ckpt="raft.ckpt",
+            device="cpu",
         ),
         "run_settings": RunSettingsResource(satellites=list(SATELLITES)),
     }
@@ -87,15 +89,15 @@ def resources(tmp_path: Path) -> dict[str, object]:
 def assets(partitions_def) -> dict[str, AssetsDefinition]:
     """One asset per satellite, built with a fast retry policy."""
     return build_amv_assets(
-        SATELLITES, partitions_def, retry_policy=FAST_RETRY,
+        SATELLITES,
+        partitions_def,
+        retry_policy=FAST_RETRY,
     )
 
 
 def fake_result(sat_id: str, t0: datetime, out_dir: Path, **kwargs) -> AmvResult:
     """An :class:`AmvResult` standing in for a real retrieval."""
-    path = Path(out_dir) / t0.strftime("%Y%m%d") / (
-        f"student_amv_{sat_id}_{t0:%Y%m%dT%H%M}.nc"
-    )
+    path = Path(out_dir) / t0.strftime("%Y%m%d") / (f"student_amv_{sat_id}_{t0:%Y%m%dT%H%M}.nc")
     fields = dict(
         dataset=synthetic_scene(sat_id, t0),
         reused=False,
@@ -107,35 +109,40 @@ def fake_result(sat_id: str, t0: datetime, out_dir: Path, **kwargs) -> AmvResult
     return AmvResult(sat_id=sat_id, timestamp=t0, path=path, **fields)
 
 
-def record_calls(monkeypatch, *, raises: dict[str, Exception] | None = None,
-                 result_kwargs: dict | None = None) -> list[dict]:
-    """Patch ``run_satellite_amv`` and capture how it was called.
-
-    Parameters
-    ----------
-    monkeypatch : pytest.MonkeyPatch
-        Fixture used to install the stand-in.
-    raises : dict, optional
-        Satellite id -> exception to raise for that satellite.
-    result_kwargs : dict, optional
-        Extra fields for the synthetic :class:`AmvResult`.
-
-    Returns
-    -------
-    list of dict
-        One entry per call, in call order.
-    """
+def record_calls(
+    monkeypatch, *, raises: dict[str, Exception] | None = None, result_kwargs: dict | None = None
+) -> list[dict]:
+    """Patch ``run_satellite_amv`` and capture how it was called."""
     calls: list[dict] = []
     failures = raises or {}
 
-    def _fake(sat_id, t0, model, disp, flow_bands, rad_bands, output_dir,
-              *, device="cpu", row_strip=1024, skip_existing=True):
-        calls.append({
-            "sat_id": sat_id, "t0": t0, "model": model, "disp": disp,
-            "flow_bands": flow_bands, "rad_bands": rad_bands,
-            "output_dir": output_dir, "device": device,
-            "row_strip": row_strip, "skip_existing": skip_existing,
-        })
+    def _fake(
+        sat_id,
+        t0,
+        model,
+        disp,
+        flow_bands,
+        rad_bands,
+        output_dir,
+        *,
+        device="cpu",
+        row_strip=1024,
+        skip_existing=True,
+    ):
+        calls.append(
+            {
+                "sat_id": sat_id,
+                "t0": t0,
+                "model": model,
+                "disp": disp,
+                "flow_bands": flow_bands,
+                "rad_bands": rad_bands,
+                "output_dir": output_dir,
+                "device": device,
+                "row_strip": row_strip,
+                "skip_existing": skip_existing,
+            }
+        )
         if sat_id in failures:
             raise failures[sat_id]
         return fake_result(sat_id, t0, output_dir, **(result_kwargs or {}))
@@ -200,7 +207,10 @@ class TestBuildAmvAsset:
 
     def test_custom_name_and_prefix(self, partitions_def):
         asset_def = build_amv_asset(
-            "goes19", partitions_def, name="custom", key_prefix="ops",
+            "goes19",
+            partitions_def,
+            name="custom",
+            key_prefix="ops",
         )
         assert asset_def.key.path == ["ops", "custom"]
 
@@ -209,11 +219,16 @@ class TestMaterialize:
     """A single satellite materializing for a single partition."""
 
     def test_succeeds_and_decodes_the_partition_key(
-        self, assets, resources, monkeypatch,
+        self,
+        assets,
+        resources,
+        monkeypatch,
     ):
         calls = record_calls(monkeypatch)
         result = materialize(
-            [assets["goes19"]], partition_key=PARTITION_KEY, resources=resources,
+            [assets["goes19"]],
+            partition_key=PARTITION_KEY,
+            resources=resources,
         )
         assert result.success
         assert len(calls) == 1
@@ -223,7 +238,9 @@ class TestMaterialize:
     def test_passes_resources_through(self, assets, resources, monkeypatch):
         calls = record_calls(monkeypatch)
         materialize(
-            [assets["gk2a"]], partition_key=PARTITION_KEY, resources=resources,
+            [assets["gk2a"]],
+            partition_key=PARTITION_KEY,
+            resources=resources,
         )
         call = calls[0]
         assert call["model"] == "fake-model"
@@ -235,25 +252,38 @@ class TestMaterialize:
         assert call["skip_existing"] is True
 
     def test_skip_existing_is_operator_controlled(
-        self, assets, resources, monkeypatch,
+        self,
+        assets,
+        resources,
+        monkeypatch,
     ):
         calls = record_calls(monkeypatch)
         resources["run_settings"] = RunSettingsResource(skip_existing=False)
         materialize(
-            [assets["gk2a"]], partition_key=PARTITION_KEY, resources=resources,
+            [assets["gk2a"]],
+            partition_key=PARTITION_KEY,
+            resources=resources,
         )
         assert calls[0]["skip_existing"] is False
 
     def test_metadata_reports_the_retrieval(
-        self, assets, resources, monkeypatch,
+        self,
+        assets,
+        resources,
+        monkeypatch,
     ):
-        record_calls(monkeypatch, result_kwargs={
-            "n_bands_missing": 3,
-            "bands_missing": ("C09", "C12", "C14"),
-            "quality_degraded": True,
-        })
+        record_calls(
+            monkeypatch,
+            result_kwargs={
+                "n_bands_missing": 3,
+                "bands_missing": ("C09", "C12", "C14"),
+                "quality_degraded": True,
+            },
+        )
         result = materialize(
-            [assets["goes18"]], partition_key=PARTITION_KEY, resources=resources,
+            [assets["goes18"]],
+            partition_key=PARTITION_KEY,
+            resources=resources,
         )
         meta = metadata_for(result, "goes18")
         assert meta["satellite"] == "goes18"
@@ -266,11 +296,16 @@ class TestMaterialize:
         assert meta["quality_degraded"] is True
 
     def test_metadata_for_a_complete_retrieval(
-        self, assets, resources, monkeypatch,
+        self,
+        assets,
+        resources,
+        monkeypatch,
     ):
         record_calls(monkeypatch)
         result = materialize(
-            [assets["goes18"]], partition_key=PARTITION_KEY, resources=resources,
+            [assets["goes18"]],
+            partition_key=PARTITION_KEY,
+            resources=resources,
         )
         meta = metadata_for(result, "goes18")
         assert meta["n_bands_missing"] == 0
@@ -279,11 +314,15 @@ class TestMaterialize:
         assert meta["status"] == "computed"
 
     def test_reuse_is_visible_in_metadata(
-        self, assets, resources, monkeypatch,
+        self,
+        assets,
+        resources,
+        monkeypatch,
     ):
         record_calls(monkeypatch, result_kwargs={"reused": True})
         result = materialize(
-            [assets["himawari9"]], partition_key=PARTITION_KEY,
+            [assets["himawari9"]],
+            partition_key=PARTITION_KEY,
             resources=resources,
         )
         meta = metadata_for(result, "himawari9")
@@ -293,23 +332,31 @@ class TestMaterialize:
     def test_output_value_is_the_path(self, assets, resources, monkeypatch):
         record_calls(monkeypatch)
         result = materialize(
-            [assets["goes19"]], partition_key=PARTITION_KEY, resources=resources,
+            [assets["goes19"]],
+            partition_key=PARTITION_KEY,
+            resources=resources,
         )
         assert result.output_for_node(amv_asset_name("goes19")).endswith(
             "student_amv_goes19_20260801T1200.nc"
         )
 
     def test_different_partitions_reach_different_timestamps(
-        self, assets, resources, monkeypatch,
+        self,
+        assets,
+        resources,
+        monkeypatch,
     ):
         calls = record_calls(monkeypatch)
         for hour in (0, 5):
             t = datetime(2026, 8, 1, hour, 0)
             materialize(
-                [assets["goes18"]], partition_key=key_for(t), resources=resources,
+                [assets["goes18"]],
+                partition_key=key_for(t),
+                resources=resources,
             )
         assert [c["t0"] for c in calls] == [
-            datetime(2026, 8, 1, 0, 0), datetime(2026, 8, 1, 5, 0),
+            datetime(2026, 8, 1, 0, 0),
+            datetime(2026, 8, 1, 5, 0),
         ]
 
 
@@ -317,7 +364,10 @@ class TestIndependentFailure:
     """The reason there is one asset per satellite."""
 
     def test_one_failure_does_not_stop_the_others(
-        self, assets, resources, monkeypatch,
+        self,
+        assets,
+        resources,
+        monkeypatch,
     ):
         record_calls(monkeypatch, raises={"gk2a": RuntimeError("no imagery")})
         result = materialize(
@@ -327,17 +377,19 @@ class TestIndependentFailure:
             raise_on_error=False,
         )
         assert not result.success
-        assert materialized_keys(result) == {
-            f"amv_{s}" for s in SATELLITES if s != "gk2a"
-        }
+        assert materialized_keys(result) == {f"amv_{s}" for s in SATELLITES if s != "gk2a"}
         failed = {e.step_key for e in result.get_step_failure_events()}
         assert failed == {amv_asset_name("gk2a")}
 
     def test_every_satellite_is_attempted(
-        self, assets, resources, monkeypatch,
+        self,
+        assets,
+        resources,
+        monkeypatch,
     ):
         calls = record_calls(
-            monkeypatch, raises={"goes18": RuntimeError("scan late")},
+            monkeypatch,
+            raises={"goes18": RuntimeError("scan late")},
         )
         materialize(
             list(assets.values()),
@@ -349,7 +401,10 @@ class TestIndependentFailure:
         assert attempted == set(SATELLITES)
 
     def test_failed_asset_retries_before_giving_up(
-        self, assets, resources, monkeypatch,
+        self,
+        assets,
+        resources,
+        monkeypatch,
     ):
         calls = record_calls(monkeypatch, raises={"gk2a": RuntimeError("boom")})
         materialize(
@@ -362,7 +417,10 @@ class TestIndependentFailure:
         assert len(calls) == 1 + FAST_RETRY.max_retries
 
     def test_failed_satellite_resumes_on_its_own(
-        self, assets, resources, monkeypatch,
+        self,
+        assets,
+        resources,
+        monkeypatch,
     ):
         instance = DagsterInstance.ephemeral()
         record_calls(monkeypatch, raises={"gk2a": RuntimeError("no imagery")})
@@ -392,14 +450,31 @@ class TestIdempotence:
     """A partition already on disk costs a listing, not a forward pass."""
 
     def test_second_materialization_reuses_the_existing_file(
-        self, assets, resources, monkeypatch, tmp_path,
+        self,
+        assets,
+        resources,
+        monkeypatch,
+        tmp_path,
     ):
         seen: list[bool] = []
 
-        def _fake(sat_id, t0, model, disp, flow_bands, rad_bands, output_dir,
-                  *, device="cpu", row_strip=1024, skip_existing=True):
-            path = Path(output_dir) / t0.strftime("%Y%m%d") / (
-                f"student_amv_{sat_id}_{t0:%Y%m%dT%H%M}.nc"
+        def _fake(
+            sat_id,
+            t0,
+            model,
+            disp,
+            flow_bands,
+            rad_bands,
+            output_dir,
+            *,
+            device="cpu",
+            row_strip=1024,
+            skip_existing=True,
+        ):
+            path = (
+                Path(output_dir)
+                / t0.strftime("%Y%m%d")
+                / (f"student_amv_{sat_id}_{t0:%Y%m%dT%H%M}.nc")
             )
             reused = skip_existing and path.exists()
             seen.append(reused)
@@ -407,15 +482,21 @@ class TestIdempotence:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(b"netcdf")
             return AmvResult(
-                sat_id=sat_id, timestamp=t0, path=path, reused=reused,
-                dataset=synthetic_scene(sat_id, t0), n_bands_missing=0,
-                bands_missing=(), quality_degraded=False,
+                sat_id=sat_id,
+                timestamp=t0,
+                path=path,
+                reused=reused,
+                dataset=synthetic_scene(sat_id, t0),
+                n_bands_missing=0,
+                bands_missing=(),
+                quality_degraded=False,
             )
 
         monkeypatch.setattr(amv_assets, "run_satellite_amv", _fake)
         for _ in range(2):
             result = materialize(
-                [assets["goes19"]], partition_key=PARTITION_KEY,
+                [assets["goes19"]],
+                partition_key=PARTITION_KEY,
                 resources=resources,
             )
             assert result.success
@@ -423,36 +504,46 @@ class TestIdempotence:
         assert metadata_for(result, "goes19")["reused"] is True
 
     def test_reused_partition_loads_no_checkpoints(
-        self, assets, resources, monkeypatch,
+        self,
+        assets,
+        resources,
+        monkeypatch,
     ):
         calls = record_calls(monkeypatch, result_kwargs={"reused": True})
         out_dir = Path(resources["paths"].output_dir)
-        existing = out_dir / T0.strftime("%Y%m%d") / (
-            f"student_amv_goes18_{T0:%Y%m%dT%H%M}.nc"
-        )
+        existing = out_dir / T0.strftime("%Y%m%d") / (f"student_amv_goes18_{T0:%Y%m%dT%H%M}.nc")
         existing.parent.mkdir(parents=True, exist_ok=True)
         existing.write_bytes(b"netcdf")
 
         # Resolving either checkpoint would blow this resource up.
         resources["model"] = ExplodingModelResource(
-            student_ckpt="student.ckpt", raft_ckpt="raft.ckpt",
+            student_ckpt="student.ckpt",
+            raft_ckpt="raft.ckpt",
         )
         result = materialize(
-            [assets["goes18"]], partition_key=PARTITION_KEY, resources=resources,
+            [assets["goes18"]],
+            partition_key=PARTITION_KEY,
+            resources=resources,
         )
         assert result.success
         assert calls[0]["model"] is None and calls[0]["disp"] is None
         assert metadata_for(result, "goes18")["reused"] is True
 
     def test_missing_partition_does_load_checkpoints(
-        self, assets, resources, monkeypatch,
+        self,
+        assets,
+        resources,
+        monkeypatch,
     ):
         record_calls(monkeypatch)
         resources["model"] = ExplodingModelResource(
-            student_ckpt="student.ckpt", raft_ckpt="raft.ckpt",
+            student_ckpt="student.ckpt",
+            raft_ckpt="raft.ckpt",
         )
         result = materialize(
-            [assets["goes18"]], partition_key=PARTITION_KEY, resources=resources,
+            [assets["goes18"]],
+            partition_key=PARTITION_KEY,
+            resources=resources,
             raise_on_error=False,
         )
         assert not result.success
