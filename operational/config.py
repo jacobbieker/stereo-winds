@@ -26,8 +26,16 @@ from typing import Iterator, Mapping
 # ``test_resources.py`` fails if these drift from upstream.
 DEFAULT_FLOW_BANDS: tuple[str, ...] = ("C08", "C09", "C10", "C12", "C14")
 DEFAULT_RAD_BANDS: tuple[str, ...] = (
-    "C07", "C08", "C09", "C10", "C11",
-    "C12", "C13", "C14", "C15", "C16",
+    "C07",
+    "C08",
+    "C09",
+    "C10",
+    "C11",
+    "C12",
+    "C13",
+    "C14",
+    "C15",
+    "C16",
 )
 
 #: Satellites served only from their icechunk stores, with no public-S3
@@ -54,19 +62,7 @@ _EPOCH = datetime(1970, 1, 1)
 
 
 def uri_scheme(uri: str) -> str | None:
-    """Lower-cased ``scheme`` of ``uri``, or ``None`` for a plain path.
-
-    Parameters
-    ----------
-    uri
-        Store location: a filesystem path or a ``scheme://`` URI.
-
-    Returns
-    -------
-    str or None
-        The scheme without the ``://`` separator, lower-cased; ``None``
-        when ``uri`` carries no scheme.
-    """
+    """Lower-cased ``scheme`` of ``uri``, or ``None`` for a plain path."""
     match = _SCHEME_RE.match(str(uri))
     return match.group(1).lower() if match else None
 
@@ -81,32 +77,6 @@ def _known_satellites() -> frozenset[str]:
 @dataclass(frozen=True)
 class OperationalConfig:
     """Settings for one operational run of the AMV pipeline.
-
-    Parameters
-    ----------
-    satellites
-        Satellite ids to retrieve, in the order they are mosaicked.  Ids
-        are keys of :data:`stereo_winds.config.SATELLITE_CONFIGS`.
-    flow_bands
-        Bands the student model runs optical flow on.
-    rad_bands
-        Bands supplying brightness temperatures to the student model.
-    cadence_minutes
-        Spacing of the operational timestamps, in minutes.
-    availability_tolerance_minutes
-        How far a scene's own timestamp may sit from the nominal slot and
-        still count as available for that slot.
-    output_dir
-        Directory for intermediate per-satellite and mosaic files.
-    store_uri
-        Destination icechunk store: a local path, or an ``s3://`` URI of
-        the form ``s3://bucket/prefix``.
-    resolution_m
-        Grid spacing of the global mosaic, in meters.
-    device
-        Torch device string for inference (``"cpu"``, ``"cuda"``, ...).
-    row_strip
-        Number of full-disk rows per forward-pass strip.
 
     Notes
     -----
@@ -124,7 +94,12 @@ class OperationalConfig:
     """
 
     satellites: tuple[str, ...] = (
-        "goes18", "goes19", "himawari9", "gk2a", "mtg-i1", "msg-iodc",
+        "goes18",
+        "goes19",
+        "himawari9",
+        "gk2a",
+        "mtg-i1",
+        "msg-iodc",
     )
     required_satellites: tuple[str, ...] | None = None
     flow_bands: tuple[str, ...] = tuple(DEFAULT_FLOW_BANDS)
@@ -143,13 +118,10 @@ class OperationalConfig:
         """Coerce sequence/path fields and reject nonsensical values."""
         object.__setattr__(self, "satellites", tuple(self.satellites))
         if self.required_satellites is None:
-            dependable = tuple(s for s in self.satellites
-                               if s not in SPARSE_COVERAGE)
-            object.__setattr__(self, "required_satellites",
-                               dependable or tuple(self.satellites))
+            dependable = tuple(s for s in self.satellites if s not in SPARSE_COVERAGE)
+            object.__setattr__(self, "required_satellites", dependable or tuple(self.satellites))
         else:
-            object.__setattr__(
-                self, "required_satellites", tuple(self.required_satellites))
+            object.__setattr__(self, "required_satellites", tuple(self.required_satellites))
         object.__setattr__(self, "flow_bands", tuple(self.flow_bands))
         object.__setattr__(self, "rad_bands", tuple(self.rad_bands))
         object.__setattr__(self, "output_dir", Path(self.output_dir))
@@ -173,18 +145,14 @@ class OperationalConfig:
                 f"ring: {sorted(unknown)}"
             )
         if self.cadence_minutes <= 0:
-            raise ValueError(
-                f"cadence_minutes must be positive, got {self.cadence_minutes}"
-            )
+            raise ValueError(f"cadence_minutes must be positive, got {self.cadence_minutes}")
         if self.availability_tolerance_minutes < 0:
             raise ValueError(
                 "availability_tolerance_minutes must be non-negative, got "
                 f"{self.availability_tolerance_minutes}"
             )
         if self.resolution_m <= 0:
-            raise ValueError(
-                f"resolution_m must be positive, got {self.resolution_m}"
-            )
+            raise ValueError(f"resolution_m must be positive, got {self.resolution_m}")
         if self.row_strip <= 0:
             raise ValueError(f"row_strip must be positive, got {self.row_strip}")
         if not self.flow_bands:
@@ -242,24 +210,10 @@ class OperationalConfig:
         return Path(self.store_uri)
 
     def store_bucket_prefix(self) -> tuple[str, str]:
-        """Split an object-storage store URI into bucket and prefix.
-
-        Returns
-        -------
-        tuple of str
-            ``(bucket, prefix)``; the prefix is ``""`` when the URI names
-            only a bucket.
-
-        Raises
-        ------
-        ValueError
-            If :attr:`store_uri` is a local path rather than an object
-            storage URI.
-        """
+        """Split an object-storage store URI into bucket and prefix."""
         if not self.store_is_s3:
             raise ValueError(
-                f"store_uri {self.store_uri!r} is a local path, not an "
-                "object-storage URI"
+                f"store_uri {self.store_uri!r} is a local path, not an " "object-storage URI"
             )
         rest = str(self.store_uri).split("://", 1)[1]
         bucket, _, prefix = rest.partition("/")
@@ -278,17 +232,6 @@ class OperationalConfig:
         continuous across midnight for a cadence that does not divide a
         day.  Timezone-aware inputs are floored on absolute time, so a
         DST transition cannot shift the grid either.
-
-        Parameters
-        ----------
-        when
-            Timestamp to floor; naive values are treated as UTC.
-
-        Returns
-        -------
-        datetime
-            The cadence-aligned slot at or before ``when``, carrying
-            ``when``'s tzinfo.
         """
         step = self.cadence.total_seconds()
         if when.tzinfo is None:
@@ -304,16 +247,6 @@ class OperationalConfig:
         two slots advances to the next one, so every yielded slot lies
         within ``[start, end]`` and a partially elapsed leading slot is
         not reprocessed.
-
-        Parameters
-        ----------
-        start, end
-            Inclusive bounds of the window.
-
-        Yields
-        ------
-        datetime
-            Each operational slot in the window, ascending.
         """
         current = self.floor_to_cadence(start)
         if current < start:
@@ -345,8 +278,7 @@ class OperationalConfig:
         # Narrowing the ring must not leave required_satellites naming
         # something the ring no longer has; what survives the narrowing
         # is kept, and an empty result is re-derived.
-        return replace(self, satellites=tuple(satellites),
-                       required_satellites=kept or None)
+        return replace(self, satellites=tuple(satellites), required_satellites=kept or None)
 
     # -- environment -------------------------------------------------------
 
@@ -364,17 +296,6 @@ class OperationalConfig:
         ``STEREO_WINDS_OP_CADENCE_MINUTES=10``.  Sequence fields are
         comma-separated; blank values are ignored.  Explicit keyword
         ``overrides`` win over the environment.
-
-        Parameters
-        ----------
-        env
-            Mapping to read instead of :data:`os.environ`.
-        **overrides
-            Field values applied after the environment.
-
-        Returns
-        -------
-        OperationalConfig
         """
         source: Mapping[str, str] = os.environ if env is None else env
         kwargs: dict[str, object] = {}
@@ -389,9 +310,7 @@ class OperationalConfig:
         for field in ("satellites", "flow_bands", "rad_bands"):
             raw = _get(field)
             if raw is not None:
-                kwargs[field] = tuple(
-                    part.strip() for part in raw.split(",") if part.strip()
-                )
+                kwargs[field] = tuple(part.strip() for part in raw.split(",") if part.strip())
         for field, caster in (
             ("cadence_minutes", int),
             ("availability_tolerance_minutes", float),
