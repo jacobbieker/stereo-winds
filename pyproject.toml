@@ -89,6 +89,9 @@ markers = [
     "integration_live: student model + live icechunk data (requires checkpoint + network)",
 ]
 
+[tool.black]
+line-length = 100
+
 [tool.setuptools.packages.find]
 include = ["stereo_winds*", "operational*"]
 exclude = ["operational.tests*"]
