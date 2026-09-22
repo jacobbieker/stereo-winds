@@ -32,6 +32,20 @@ Outputs use a deterministic layout under ``--output-dir``::
 so a run over a time range can be re-run, resumed (``--skip-existing``)
 and globbed without ambiguity.
 
+With ``--icechunk-store`` that layout is not used: the store holds the
+mosaics, and the per-satellite disks become intermediates.  They are
+written to a per-timestamp scratch folder under ``--temp-dir``
+(``output/`` by default)::
+
+    <temp-dir>/ring_scratch_<YYYYMMDDTHHMM>_<random>/<YYYYMMDD>/*.nc
+
+which is removed once that timestamp's mosaic has been committed.  Six
+full disks are ~1.4 GB per timestamp, so a month-long run would
+otherwise leave hundreds of gigabytes behind for files nothing reads
+again.  ``--keep-temp`` retains a folder for inspection, and
+``--keep-netcdf`` restores the old behaviour of persisting both sets of
+NetCDF files under ``--output-dir`` alongside the store.
+
 Satellites are not all on the same schedule: SEVIRI repeats every 15
 minutes where the rest of the ring scans every 10, so temporal pairs use
 each satellite's own cadence and the resulting flow is rescaled to the
@@ -43,10 +57,11 @@ only the timestamps where every satellite can supply a full
 t-10min/t/t+10min triplet, so the mosaic has the same contributors at
 every output time.
 
-With ``--icechunk-store`` the global mosaic is additionally appended to
-an icechunk store (S3 or local) as one commit per timestamp, and
-``--skip-existing`` then resumes from the timestamps that store already
-holds.  Pass ``--no-netcdf`` to write only to the store.
+With ``--icechunk-store`` the global mosaic is written to an icechunk
+store — ``s3://bucket/prefix`` or a local directory — as one commit per
+timestamp, and ``--skip-existing`` then resumes from the timestamps that
+store already holds.  Pass ``--no-netcdf`` to skip the per-satellite
+scratch files too, keeping the whole timestamp in memory.
 
 Navigation always uses the projection metadata carried by the scenes
 actually loaded — sub-satellite longitude, perspective height and grid
@@ -65,11 +80,13 @@ Usage::
         --output-dir output/global_ring \
         --device cuda
 
-    # time range appended to an S3 icechunk store, resuming what it holds
+    # time range appended to an S3 icechunk store, resuming what it holds;
+    # per-satellite disks go to output/ and are deleted after each commit
     pixi run python scripts/infer_student_global_ring.py \
         --time "2026-08-01T00:00" --end-time "2026-08-30T00:00" \
-        --step-minutes 10 --skip-existing --no-netcdf \
+        --step-minutes 10 --skip-existing \
         --icechunk-store s3://my-bucket/student-amv.icechunk \
+        --temp-dir output \
         --student-ckpt checkpoints/student.abi.mb-v3.ep21.ckpt \
         --raft-ckpt checkpoints/windflow.raft.sonde-tuned.ckpt \
         --device cuda
@@ -85,6 +102,8 @@ import logging
 import os
 import re
 import resource
+import shutil
+import tempfile
 import threading
 import sys
 from collections import OrderedDict
@@ -211,6 +230,48 @@ def sat_nc_path(out_dir: Path, sat_id: str, t: datetime) -> Path:
 def global_nc_path(out_dir: Path, t: datetime) -> Path:
     """Path of the merged global mosaic file for ``t``."""
     return day_dir(out_dir, t) / f"student_amv_global_{time_tag(t)}.nc"
+
+
+#: Prefix of the per-timestamp scratch folders, so a folder left behind
+#: by a killed run is recognisable (and safe to delete) afterwards.
+SCRATCH_PREFIX = "ring_scratch_"
+
+
+def make_scratch_dir(temp_root: Path, t: datetime) -> Path:
+    """Create this timestamp's scratch folder under ``temp_root``.
+
+    Per-satellite mosaics written here are intermediates: they feed the
+    global mosaic and are removed once it has been committed.  The name
+    carries the timestamp so a folder surviving a crash says which one
+    it belongs to, and ``mkdtemp`` keeps concurrent runs apart.
+    """
+    temp_root = Path(temp_root)
+    temp_root.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(
+        prefix=f"{SCRATCH_PREFIX}{time_tag(t)}_", dir=temp_root))
+
+
+def remove_scratch_dir(scratch: Path | None) -> None:
+    """Delete a scratch folder, reporting rather than raising on failure.
+
+    A scratch folder that cannot be removed is worth knowing about — it
+    is how a long run fills its disk — but it must not lose a mosaic
+    that has already been committed.
+    """
+    if scratch is None or not Path(scratch).exists():
+        return
+    try:
+        freed = sum(p.stat().st_size for p in Path(scratch).rglob("*")
+                    if p.is_file())
+    except OSError:
+        freed = 0
+    try:
+        shutil.rmtree(scratch)
+    except OSError:
+        logger.exception("Could not remove the scratch folder %s — it will "
+                         "keep using disk until removed by hand", scratch)
+        return
+    logger.info("Removed scratch folder %s (%.1f GB)", scratch, freed / 2**30)
 
 
 def time_steps(
@@ -1542,24 +1603,36 @@ def process_time(
     icechunk_chunk: int = 1024,
     icechunk_times: set[datetime] | None = None,
     write_netcdf: bool = True,
+    global_netcdf: bool = True,
+    temp_dir: Path | None = None,
+    keep_temp: bool = False,
     prefetcher: ScenePrefetcher | None = None,
 ) -> bool:
     """Run the full ring for a single timestamp and write its output.
 
-    Output goes to per-day NetCDF files and, when ``repo`` is given, is
-    also appended to an icechunk store as a new commit.
+    Output goes to per-day NetCDF files under ``out_dir`` and, when
+    ``repo`` is given, to an icechunk store as a new commit.
+
+    With ``temp_dir`` the per-satellite mosaics are intermediates rather
+    than deliverables: they go to a scratch folder created under it and
+    are removed once the global mosaic has been committed, so a long run
+    does not accumulate full disks it will never read again.  Set
+    ``keep_temp`` to leave the folder in place for inspection.  It is
+    ignored under ``skip_global``, where those files are the only output
+    and deleting them would leave the timestamp with nothing.
 
     Returns True if output exists for this timestamp when the call ends
     (either newly written or already present under ``--skip-existing``).
     """
     tag = time_tag(t0)
-    step_dir = day_dir(out_dir, t0)
     icechunk_times = icechunk_times if icechunk_times is not None else set()
 
     if skip_existing and not skip_global:
         # Done only when every configured sink already holds this timestamp.
+        # The scratch copies are not a sink: they are deleted after every
+        # commit, so their absence says nothing about what has been written.
         sinks = []
-        if write_netcdf:
+        if global_netcdf:
             sinks.append(("netcdf", global_nc_path(out_dir, t0).exists()))
         if repo is not None:
             sinks.append(("icechunk", t0 in icechunk_times))
@@ -1568,8 +1641,71 @@ def process_time(
                         " and ".join(name for name, _ in sinks))
             return True
 
+    # Per-satellite files land in a scratch folder when one is configured,
+    # and beside the mosaic otherwise.  Never under --skip-global: with no
+    # mosaic to commit, they are the output rather than an intermediate.
+    scratch = (make_scratch_dir(temp_dir, t0)
+               if write_netcdf and temp_dir is not None and not skip_global
+               else None)
+    sat_root = scratch if scratch is not None else out_dir
+    if scratch is not None:
+        logger.info("[%s] Per-satellite mosaics -> %s (removed after the "
+                    "global mosaic is committed)", tag, scratch)
+
+    try:
+        return _process_time_inner(
+            t0, sats, model, disp, flow_bands, rad_bands, out_dir,
+            sat_root=sat_root, device=device, row_strip=row_strip,
+            resolution_m=resolution_m, skip_global=skip_global,
+            skip_existing=skip_existing, repo=repo,
+            icechunk_branch=icechunk_branch, icechunk_chunk=icechunk_chunk,
+            icechunk_times=icechunk_times, write_netcdf=write_netcdf,
+            global_netcdf=global_netcdf, prefetcher=prefetcher,
+        )
+    finally:
+        # After the commit, whether or not it succeeded: a scratch folder
+        # kept "just in case" is what fills the disk on a long run.
+        if scratch is not None and not keep_temp:
+            remove_scratch_dir(scratch)
+        elif scratch is not None:
+            logger.info("[%s] Keeping scratch folder %s", tag, scratch)
+
+
+def _process_time_inner(
+    t0: datetime,
+    sats: list[str],
+    model: StudentWindsModel,
+    disp: StereoDisparity,
+    flow_bands: list[str],
+    rad_bands: list[str],
+    out_dir: Path,
+    sat_root: Path,
+    device: str = "cuda",
+    row_strip: int = 1024,
+    resolution_m: float = 2000.0,
+    skip_global: bool = False,
+    skip_existing: bool = False,
+    repo=None,
+    icechunk_branch: str = "main",
+    icechunk_chunk: int = 1024,
+    icechunk_times: set[datetime] | None = None,
+    write_netcdf: bool = True,
+    global_netcdf: bool = True,
+    prefetcher: ScenePrefetcher | None = None,
+) -> bool:
+    """One timestamp, with the per-satellite directory already decided.
+
+    Split out so :func:`process_time` can own the scratch folder's
+    lifetime in one place rather than threading cleanup through every
+    early return.
+    """
+    tag = time_tag(t0)
+    icechunk_times = icechunk_times if icechunk_times is not None else set()
+
     if write_netcdf:
-        step_dir.mkdir(parents=True, exist_ok=True)
+        day_dir(sat_root, t0).mkdir(parents=True, exist_ok=True)
+    if global_netcdf and not skip_global:
+        day_dir(out_dir, t0).mkdir(parents=True, exist_ok=True)
 
     # Satellites are gridded as they finish and dropped immediately:
     # holding all six full disks costs ~6 GB for no benefit.
@@ -1585,7 +1721,8 @@ def process_time(
         """Start this satellite's reads, unless it will be skipped."""
         if prefetcher is None:
             return
-        if not _needs_inference(sat_id, t0, out_dir, skip_existing, write_netcdf):
+        if not _needs_inference(sat_id, t0, sat_root, skip_existing,
+                                write_netcdf):
             return
         prefetcher.submit(scene_requests(sat_id, t0, flow_bands, rad_bands,
                                          rad_tf))
@@ -1595,7 +1732,7 @@ def process_time(
         queue(todo[0])
 
     for i, sat_id in enumerate(todo):
-        nc_path = sat_nc_path(out_dir, sat_id, t0)
+        nc_path = sat_nc_path(sat_root, sat_id, t0)
         ds = None
         if skip_existing and write_netcdf and nc_path.exists():
             logger.info("[%s] %s already exists — reusing %s",
@@ -1651,7 +1788,7 @@ def process_time(
                     tag, resolution_m)
         ds_global = mosaic.to_dataset()
 
-        if write_netcdf:
+        if global_netcdf:
             global_path = global_nc_path(out_dir, t0)
             ds_global.to_netcdf(global_path)
             logger.info("Saved global mosaic: %s", global_path)
@@ -1773,12 +1910,33 @@ def main():
                          "source.coop)")
     ic.add_argument("--no-netcdf", action="store_true",
                     help="Write only to the icechunk store, skipping the "
-                         "per-day NetCDF files")
+                         "per-satellite files entirely (they are otherwise "
+                         "written to the scratch folder and deleted after "
+                         "each commit)")
+    ic.add_argument("--keep-netcdf", action="store_true",
+                    help="Also keep per-day NetCDF files under --output-dir, "
+                         "as before --temp-dir existed: per-satellite and "
+                         "global mosaics both persist alongside the store")
+
+    tmp = ap.add_argument_group("scratch space")
+    tmp.add_argument("--temp-dir", default="output",
+                     help="Parent of the per-timestamp scratch folder "
+                          "holding per-satellite mosaics, which is removed "
+                          "once the global mosaic is committed "
+                          "(default: output)")
+    tmp.add_argument("--keep-temp", action="store_true",
+                     help="Leave each scratch folder in place instead of "
+                          "removing it, for inspecting a bad timestamp")
     args = ap.parse_args()
 
     if args.no_netcdf and not args.icechunk_store:
         ap.error("--no-netcdf requires --icechunk-store; otherwise nothing "
                  "would be written")
+    if args.no_netcdf and args.keep_netcdf:
+        ap.error("--no-netcdf and --keep-netcdf ask for opposite things")
+    if args.keep_temp and not args.icechunk_store:
+        ap.error("--keep-temp only applies to the scratch folder, which is "
+                 "used when --icechunk-store is given")
     if args.icechunk_store and args.skip_global:
         ap.error("--icechunk-store writes the global mosaic, which "
                  "--skip-global disables")
@@ -1791,7 +1949,15 @@ def main():
         ap.error(str(exc))
 
     out_dir = Path(args.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # With a store, the NetCDF files are intermediates unless asked for:
+    # the mosaic lives in the store, and the per-satellite disks go to a
+    # scratch folder that is emptied after every commit.
+    scratch_mode = bool(args.icechunk_store) and not args.keep_netcdf
+    temp_dir = Path(args.temp_dir) if scratch_mode else None
+    global_netcdf = not args.no_netcdf and not scratch_mode
+    if global_netcdf or not args.icechunk_store:
+        out_dir.mkdir(parents=True, exist_ok=True)
 
     sats = (args.satellites.split(",") if args.satellites
             else RING_SATELLITES)
@@ -1900,6 +2066,9 @@ def main():
                 icechunk_chunk=args.icechunk_chunk,
                 icechunk_times=icechunk_times,
                 write_netcdf=not args.no_netcdf,
+                global_netcdf=global_netcdf,
+                temp_dir=temp_dir,
+                keep_temp=args.keep_temp,
                 prefetcher=prefetcher,
             )
         except Exception:
@@ -1914,9 +2083,12 @@ def main():
         logger.info("Final %s", prefetcher.cache.summary())
         prefetcher.shutdown()
 
-    where = args.icechunk_store if args.no_netcdf else str(out_dir)
-    if args.icechunk_store and not args.no_netcdf:
+    if not args.icechunk_store:
+        where = str(out_dir)
+    elif global_netcdf:
         where = f"{out_dir} and {args.icechunk_store}"
+    else:
+        where = str(args.icechunk_store)
     logger.info("Done: %d/%d timestamps produced output in %s",
                 n_ok, len(times), where)
     if failed:
