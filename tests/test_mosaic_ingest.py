@@ -25,7 +25,8 @@ from stereo_winds.icechunk_output import (  # noqa: E402
 
 def _load_script():
     spec = importlib.util.spec_from_file_location(
-        "write_mosaics", BASE / "scripts" / "write_mosaics_to_icechunk.py")
+        "write_mosaics", BASE / "scripts" / "write_mosaics_to_icechunk.py"
+    )
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
@@ -34,8 +35,7 @@ def _load_script():
 
 ingest_script = _load_script()
 T0 = datetime(2026, 7, 28)
-VARS = ["u_wind", "v_wind", "cloud_top_height", "quality_flag",
-        "sigma_u", "sigma_v", "sigma_h"]
+VARS = ["u_wind", "v_wind", "cloud_top_height", "quality_flag", "sigma_u", "sigma_v", "sigma_h"]
 
 
 def _mosaic(satellites, codes=None, n=4, value=1.0):
@@ -43,27 +43,30 @@ def _mosaic(satellites, codes=None, n=4, value=1.0):
     data = {v: np.full((n, n), value, np.float32) for v in VARS}
     ds = xr.Dataset(
         {v: (("latitude", "longitude"), data[v]) for v in VARS},
-        coords={"latitude": np.linspace(-80, 80, n),
-                "longitude": np.linspace(-170, 170, n)},
-        attrs={"title": "Global student AMV mosaic", "resolution_m": 10000.0,
-               "satellites": list(satellites)},
+        coords={"latitude": np.linspace(-80, 80, n), "longitude": np.linspace(-170, 170, n)},
+        attrs={
+            "title": "Global student AMV mosaic",
+            "resolution_m": 10000.0,
+            "satellites": list(satellites),
+        },
     )
     if codes is None:
-        codes = np.tile(np.arange(len(satellites), dtype=np.int8),
-                        (n, n // len(satellites) + 1))[:, :n]
-    ds["source_satellite_index"] = (("latitude", "longitude"),
-                                    codes.astype(np.int8))
-    ds["source_satellite_index"].attrs.update({
-        "flag_values": list(range(len(satellites))),
-        "flag_meanings": " ".join(satellites),
-        "no_source_index": NO_SOURCE,
-    })
+        codes = np.tile(np.arange(len(satellites), dtype=np.int8), (n, n // len(satellites) + 1))[
+            :, :n
+        ]
+    ds["source_satellite_index"] = (("latitude", "longitude"), codes.astype(np.int8))
+    ds["source_satellite_index"].attrs.update(
+        {
+            "flag_values": list(range(len(satellites))),
+            "flag_meanings": " ".join(satellites),
+            "no_source_index": NO_SOURCE,
+        }
+    )
     return ds
 
 
 def _write(ds, root, when):
-    path = (root / when.strftime("%Y%m%d")
-            / f"student_amv_global_{when:%Y%m%dT%H%M}.nc")
+    path = root / when.strftime("%Y%m%d") / f"student_amv_global_{when:%Y%m%dT%H%M}.nc"
     path.parent.mkdir(parents=True, exist_ok=True)
     ds.to_netcdf(path)
     return path
@@ -81,8 +84,7 @@ class TestDiscovery:
         for hours in (12, 0, 6):
             _write(_mosaic(["goes19"]), tmp_path, T0 + timedelta(hours=hours))
         found = ingest_script.find_mosaics([tmp_path])
-        assert [t for t, _ in found] == [T0, T0 + timedelta(hours=6),
-                                         T0 + timedelta(hours=12)]
+        assert [t for t, _ in found] == [T0, T0 + timedelta(hours=6), T0 + timedelta(hours=12)]
 
     def test_timestamp_comes_from_the_filename(self, tmp_path):
         path = _write(_mosaic(["goes19"]), tmp_path, T0)
@@ -101,19 +103,15 @@ class TestDiscovery:
 class TestVocabulary:
     def test_union_in_first_seen_order(self, tmp_path):
         _write(_mosaic(["goes18", "goes19"]), tmp_path, T0)
-        _write(_mosaic(["goes18", "goes19", "gk2a"]), tmp_path,
-               T0 + timedelta(hours=6))
-        _write(_mosaic(["goes19", "himawari9"]), tmp_path,
-               T0 + timedelta(hours=12))
+        _write(_mosaic(["goes18", "goes19", "gk2a"]), tmp_path, T0 + timedelta(hours=6))
+        _write(_mosaic(["goes19", "himawari9"]), tmp_path, T0 + timedelta(hours=12))
         found = ingest_script.find_mosaics([tmp_path])
-        assert ingest_script.collect_vocabulary(found) == [
-            "goes18", "goes19", "gk2a", "himawari9"]
+        assert ingest_script.collect_vocabulary(found) == ["goes18", "goes19", "gk2a", "himawari9"]
 
     def test_starts_from_an_existing_store_vocabulary(self, tmp_path):
         _write(_mosaic(["gk2a"]), tmp_path, T0)
         found = ingest_script.find_mosaics([tmp_path])
-        assert ingest_script.collect_vocabulary(
-            found, start=["goes18"]) == ["goes18", "gk2a"]
+        assert ingest_script.collect_vocabulary(found, start=["goes18"]) == ["goes18", "gk2a"]
 
     def test_reads_the_list_from_the_variable(self):
         ds = _mosaic(["goes18", "gk2a"])
@@ -124,8 +122,7 @@ class TestAlignSourceCodes:
     def test_codes_are_remapped_to_the_shared_vocabulary(self):
         """Regression: code 2 meant gk2a in one mosaic and himawari9 in another."""
         vocabulary = ["goes18", "goes19", "gk2a"]
-        ds = _mosaic(["goes19", "himawari9"],
-                     codes=np.array([[0, 1], [1, 0]], np.int8), n=2)
+        ds = _mosaic(["goes19", "himawari9"], codes=np.array([[0, 1], [1, 0]], np.int8), n=2)
         out = align_source_codes(ds, vocabulary)
         assert vocabulary == ["goes18", "goes19", "gk2a", "himawari9"]
         # goes19 -> 1, himawari9 -> 3
@@ -137,16 +134,14 @@ class TestAlignSourceCodes:
         codes = np.array([[0, 1], [1, 0]], np.int8)
         out = align_source_codes(_mosaic(names, codes=codes, n=2), vocabulary)
         assert np.array_equal(
-            _decode(codes, names),
-            _decode(out["source_satellite_index"].values, vocabulary))
+            _decode(codes, names), _decode(out["source_satellite_index"].values, vocabulary)
+        )
 
     def test_the_sentinel_survives(self):
         vocabulary = ["goes18"]
         codes = np.array([[NO_SOURCE, 0], [0, NO_SOURCE]], np.int8)
-        out = align_source_codes(_mosaic(["goes18"], codes=codes, n=2),
-                                 vocabulary)
-        assert out["source_satellite_index"].values.tolist() == [
-            [NO_SOURCE, 0], [0, NO_SOURCE]]
+        out = align_source_codes(_mosaic(["goes18"], codes=codes, n=2), vocabulary)
+        assert out["source_satellite_index"].values.tolist() == [[NO_SOURCE, 0], [0, NO_SOURCE]]
 
     def test_existing_codes_keep_their_meaning(self):
         """Names are only appended, so codes already written stay valid."""
@@ -179,18 +174,15 @@ class TestIngest:
         assert (written, failed) == (3, [])
         stored = _stored(repo)
         assert stored.sizes["time"] == 3
-        assert [pd.Timestamp(v).to_pydatetime()
-                for v in stored.time.values] == times
+        assert [pd.Timestamp(v).to_pydatetime() for v in stored.time.values] == times
 
     def test_values_match_the_source(self, tmp_path, repo):
         source = _mosaic(["goes18"], value=3.5)
         _write(source, tmp_path, T0)
-        ingest_script.ingest(ingest_script.find_mosaics([tmp_path]), repo,
-                             vocabulary=[])
+        ingest_script.ingest(ingest_script.find_mosaics([tmp_path]), repo, vocabulary=[])
         stored = _stored(repo).isel(time=0)
         for var in VARS:
-            assert np.array_equal(stored[var].values, source[var].values,
-                                  equal_nan=True)
+            assert np.array_equal(stored[var].values, source[var].values, equal_nan=True)
 
     def test_resume_skips_what_is_there(self, tmp_path, repo):
         for i in range(2):
@@ -201,15 +193,18 @@ class TestIngest:
         _write(_mosaic(["goes18"]), tmp_path, T0 + timedelta(hours=12))
         found = ingest_script.find_mosaics([tmp_path])
         written, _ = ingest_script.ingest(
-            found, repo, skip=set(icechunk_existing_times(repo)), vocabulary=[])
+            found, repo, skip=set(icechunk_existing_times(repo)), vocabulary=[]
+        )
         assert written == 1
         assert _stored(repo).sizes["time"] == 3
 
     def test_provenance_survives_differing_vocabularies(self, tmp_path, repo):
         """The real store mixes 2-, 3- and 4-satellite mosaics."""
-        specs = [(["goes18", "goes19"], T0),
-                 (["goes18", "goes19", "gk2a"], T0 + timedelta(hours=6)),
-                 (["goes19", "himawari9"], T0 + timedelta(hours=12))]
+        specs = [
+            (["goes18", "goes19"], T0),
+            (["goes18", "goes19", "gk2a"], T0 + timedelta(hours=6)),
+            (["goes19", "himawari9"], T0 + timedelta(hours=12)),
+        ]
         sources = {}
         for names, when in specs:
             ds = _mosaic(names)
@@ -223,39 +218,33 @@ class TestIngest:
         stored = _stored(repo)
         store_names = stored["source_satellite_index"].attrs["flag_meanings"].split()
         for when, (names, codes) in sources.items():
-            got = stored["source_satellite_index"].sel(
-                time=np.datetime64(when, "ns")).values
-            assert np.array_equal(_decode(codes, names),
-                                  _decode(got, store_names)), when
+            got = stored["source_satellite_index"].sel(time=np.datetime64(when, "ns")).values
+            assert np.array_equal(_decode(codes, names), _decode(got, store_names)), when
 
-    def test_vocabulary_grows_without_invalidating_earlier_steps(
-            self, tmp_path, repo):
+    def test_vocabulary_grows_without_invalidating_earlier_steps(self, tmp_path, repo):
         first = _mosaic(["goes18", "goes19"])
         _write(first, tmp_path, T0)
         found = ingest_script.find_mosaics([tmp_path])
-        ingest_script.ingest(found, repo,
-                             vocabulary=ingest_script.collect_vocabulary(found))
+        ingest_script.ingest(found, repo, vocabulary=ingest_script.collect_vocabulary(found))
         assert store_vocabulary(repo) == ["goes18", "goes19"]
 
         later = _mosaic(["goes18", "himawari9"])
         path = _write(later, tmp_path, T0 + timedelta(hours=6))
         found = ingest_script.find_mosaics([path])
-        vocabulary = ingest_script.collect_vocabulary(
-            found, store_vocabulary(repo))
+        vocabulary = ingest_script.collect_vocabulary(found, store_vocabulary(repo))
         ingest_script.ingest(found, repo, vocabulary=vocabulary)
 
         assert store_vocabulary(repo) == ["goes18", "goes19", "himawari9"]
         stored = _stored(repo)
         names = stored["source_satellite_index"].attrs["flag_meanings"].split()
         assert np.array_equal(
-            _decode(first["source_satellite_index"].values,
-                    ["goes18", "goes19"]),
-            _decode(stored["source_satellite_index"].isel(time=0).values, names))
+            _decode(first["source_satellite_index"].values, ["goes18", "goes19"]),
+            _decode(stored["source_satellite_index"].isel(time=0).values, names),
+        )
 
     def test_an_unreadable_mosaic_does_not_stop_the_rest(self, tmp_path, repo):
         _write(_mosaic(["goes18"]), tmp_path, T0)
-        bad = (tmp_path / "20260728"
-               / "student_amv_global_20260728T0600.nc")
+        bad = tmp_path / "20260728" / "student_amv_global_20260728T0600.nc"
         bad.write_bytes(b"not a netcdf")
         _write(_mosaic(["goes18"]), tmp_path, T0 + timedelta(hours=12))
 
@@ -263,3 +252,105 @@ class TestIngest:
         written, failed = ingest_script.ingest(found, repo, vocabulary=[])
         assert written == 2
         assert failed == [T0 + timedelta(hours=6)]
+
+
+class TestPerTimestepQuality:
+    """Quality describes one timestep, not whatever was written last."""
+
+    @staticmethod
+    def _mosaic(satellites, degraded, note):
+        idx = np.full((4, 8), -1, dtype="int8")
+        for code, _ in enumerate(satellites):
+            idx[:, code :: len(satellites)] = code
+        ds = xr.Dataset(
+            {
+                "u_wind": (("latitude", "longitude"), np.full((4, 8), 10.0, dtype="float32")),
+                "source_satellite_index": (("latitude", "longitude"), idx),
+            },
+            coords={"latitude": np.linspace(-80, 80, 4), "longitude": np.linspace(-180, 175, 8)},
+        )
+        ds.attrs.update(
+            satellites=list(satellites),
+            quality_degraded=int(degraded),
+            quality_note=note,
+            satellites_missing="gk2a" if degraded else "",
+        )
+        return ds
+
+    def test_a_clean_append_does_not_erase_an_earlier_degraded_cycle(self, tmp_path):
+        repo = open_icechunk_repo(str(tmp_path / "amv.icechunk"))
+        vocabulary: list[str] = []
+        write_mosaic_to_icechunk(
+            repo,
+            self._mosaic(["goes18"], True, "DEGRADED: gk2a missing"),
+            datetime(2026, 8, 1, 0, 0),
+            vocabulary=vocabulary,
+        )
+        write_mosaic_to_icechunk(
+            repo,
+            self._mosaic(["goes18", "gk2a"], False, "complete"),
+            datetime(2026, 8, 1, 6, 0),
+            vocabulary=vocabulary,
+        )
+
+        ds = xr.open_zarr(repo.readonly_session("main").store, consolidated=False)
+        assert [int(v) for v in ds["quality_degraded"].values] == [1, 0]
+        assert str(ds["quality_note"].values[0]) == "DEGRADED: gk2a missing"
+        assert str(ds["satellites_missing"].values[0]) == "gk2a"
+
+    def test_quality_is_not_a_group_attribute(self, tmp_path):
+        """Group attrs are rewritten on every append; these must not be."""
+        repo = open_icechunk_repo(str(tmp_path / "amv.icechunk"))
+        write_mosaic_to_icechunk(
+            repo,
+            self._mosaic(["goes18"], True, "DEGRADED"),
+            datetime(2026, 8, 1, 0, 0),
+            vocabulary=[],
+        )
+        ds = xr.open_zarr(repo.readonly_session("main").store, consolidated=False)
+        assert "quality_degraded" not in ds.attrs
+        assert "quality_note" not in ds.attrs
+        assert "quality_degraded" in ds.variables
+
+    def test_replace_repairs_a_timestep_without_duplicating_it(self, tmp_path):
+        repo = open_icechunk_repo(str(tmp_path / "amv.icechunk"))
+        vocabulary: list[str] = []
+        t0 = datetime(2026, 8, 1, 0, 0)
+        write_mosaic_to_icechunk(
+            repo,
+            self._mosaic(["goes18"], True, "DEGRADED: gk2a missing"),
+            t0,
+            vocabulary=vocabulary,
+        )
+
+        repaired = self._mosaic(["goes18", "gk2a"], False, "repaired")
+        assert write_mosaic_to_icechunk(repo, repaired, t0, vocabulary=vocabulary) == "skipped"
+        assert (
+            write_mosaic_to_icechunk(repo, repaired, t0, vocabulary=vocabulary, replace=True)
+            == "replaced"
+        )
+
+        ds = xr.open_zarr(repo.readonly_session("main").store, consolidated=False)
+        assert ds.sizes["time"] == 1, "a replace must not append a duplicate"
+        assert int(ds["quality_degraded"].values[0]) == 0
+        assert str(ds["quality_note"].values[0]) == "repaired"
+        assert set(np.unique(ds["source_satellite_index"].values)) == {0, 1}
+
+    def test_a_store_without_the_quality_variables_still_accepts_appends(self, tmp_path):
+        """Stores written before this change must keep working."""
+        repo = open_icechunk_repo(str(tmp_path / "old.icechunk"))
+        vocabulary: list[str] = []
+        plain = self._mosaic(["goes18"], False, "")
+        del plain.attrs["quality_degraded"], plain.attrs["quality_note"]
+        del plain.attrs["satellites_missing"]
+        write_mosaic_to_icechunk(repo, plain, datetime(2026, 8, 1, 0, 0), vocabulary=vocabulary)
+        write_mosaic_to_icechunk(
+            repo,
+            self._mosaic(["goes18"], True, "DEGRADED"),
+            datetime(2026, 8, 1, 6, 0),
+            vocabulary=vocabulary,
+        )
+
+        ds = xr.open_zarr(repo.readonly_session("main").store, consolidated=False)
+        assert ds.sizes["time"] == 2
+        assert "quality_degraded" not in ds.variables

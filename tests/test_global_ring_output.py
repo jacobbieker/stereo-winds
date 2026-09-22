@@ -39,7 +39,9 @@ T0 = datetime(2026, 8, 1, 0, 0)
 def _fake_scene(sat_id: str, t0: datetime, ny: int = 8, nx: int = 8):
     """A tiny synthetic per-satellite AMV dataset over a small lat/lon patch."""
     lat, lon = np.meshgrid(
-        np.linspace(-20, 20, ny), np.linspace(-30, 30, nx), indexing="ij",
+        np.linspace(-20, 20, ny),
+        np.linspace(-30, 30, nx),
+        indexing="ij",
     )
     zenith = {"goes18": 10.0, "goes19": 20.0}[sat_id]
     data = {k: np.full((ny, nx), 1.0, np.float32) for k in ring.OUTPUT_VARS}
@@ -71,11 +73,19 @@ def stub_infer(monkeypatch):
 def _run(t, out_dir, calls_sats=("goes18", "goes19"), **kwargs):
     kwargs.setdefault("resolution_m", 200_000.0)
     return ring.process_time(
-        t, list(calls_sats), None, None, ["C14"], ["C14"], out_dir, **kwargs,
+        t,
+        list(calls_sats),
+        None,
+        None,
+        ["C14"],
+        ["C14"],
+        out_dir,
+        **kwargs,
     )
 
 
 # ── Time range ────────────────────────────────────────────────────────
+
 
 class TestTimeSteps:
     def test_single_time_when_no_end(self):
@@ -105,9 +115,11 @@ class TestOutputPaths:
     def test_deterministic_and_day_partitioned(self):
         out = Path("/out")
         assert ring.sat_nc_path(out, "goes19", T0) == (
-            out / "20260801" / "student_amv_goes19_20260801T0000.nc")
+            out / "20260801" / "student_amv_goes19_20260801T0000.nc"
+        )
         assert ring.global_nc_path(out, T0) == (
-            out / "20260801" / "student_amv_global_20260801T0000.nc")
+            out / "20260801" / "student_amv_global_20260801T0000.nc"
+        )
 
     def test_day_boundary_splits_directories(self):
         late = datetime(2026, 8, 1, 23, 50)
@@ -117,11 +129,11 @@ class TestOutputPaths:
 
 # ── NetCDF output ─────────────────────────────────────────────────────
 
+
 class TestNetcdfOutput:
     def test_writes_expected_files(self, tmp_path, stub_infer):
         assert _run(T0, tmp_path) is True
-        written = sorted(p.relative_to(tmp_path).as_posix()
-                         for p in tmp_path.rglob("*.nc"))
+        written = sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*.nc"))
         assert written == [
             "20260801/student_amv_global_20260801T0000.nc",
             "20260801/student_amv_goes18_20260801T0000.nc",
@@ -155,6 +167,7 @@ class TestNetcdfOutput:
 
 
 # ── Icechunk output ───────────────────────────────────────────────────
+
 
 @pytest.fixture
 def repo(tmp_path):
@@ -198,8 +211,14 @@ class TestIcechunkOutput:
 
         extended = ring.time_steps(T0, T0 + timedelta(minutes=30), 10)
         for t in extended:
-            _run(t, tmp_path, repo=repo, icechunk_times=resumed,
-                 write_netcdf=False, skip_existing=True)
+            _run(
+                t,
+                tmp_path,
+                repo=repo,
+                icechunk_times=resumed,
+                write_netcdf=False,
+                skip_existing=True,
+            )
 
         # Only the two new timestamps were computed, for two satellites each.
         assert len(stub_infer) - n_before == 4
@@ -217,8 +236,7 @@ class TestIcechunkOutput:
         assert ring.icechunk_existing_times(repo) == set()
 
     def test_chunks_are_bounded(self, tmp_path, repo, stub_infer):
-        _run(T0, tmp_path, repo=repo, icechunk_times=set(),
-             write_netcdf=False, icechunk_chunk=64)
+        _run(T0, tmp_path, repo=repo, icechunk_times=set(), write_netcdf=False, icechunk_chunk=64)
         chunks = _store_ds(repo).u_wind.encoding["chunks"]
         assert chunks[0] == 1
         assert max(chunks[1:]) <= 64
@@ -237,6 +255,7 @@ class TestIcechunkStorage:
 
 # ── Common-time filtering ─────────────────────────────────────────────
 
+
 def _t64(*times):
     return np.array([np.datetime64(t, "ns") for t in times])
 
@@ -244,29 +263,25 @@ def _t64(*times):
 class TestHasScanNear:
     def test_exact_match(self):
         times = _t64(datetime(2026, 8, 1, 0, 0), datetime(2026, 8, 1, 0, 10))
-        assert ring._has_scan_near(times, datetime(2026, 8, 1, 0, 10),
-                                   timedelta(minutes=5))
+        assert ring._has_scan_near(times, datetime(2026, 8, 1, 0, 10), timedelta(minutes=5))
 
     def test_within_tolerance(self):
         """AMI stamps scans at HH:09:35, so slots never line up exactly."""
         times = _t64(datetime(2026, 8, 1, 0, 9, 35))
-        assert ring._has_scan_near(times, datetime(2026, 8, 1, 0, 10),
-                                   timedelta(minutes=5))
+        assert ring._has_scan_near(times, datetime(2026, 8, 1, 0, 10), timedelta(minutes=5))
 
     def test_outside_tolerance(self):
         times = _t64(datetime(2026, 8, 1, 0, 0), datetime(2026, 8, 1, 0, 30))
-        assert not ring._has_scan_near(times, datetime(2026, 8, 1, 0, 15),
-                                       timedelta(minutes=5))
+        assert not ring._has_scan_near(times, datetime(2026, 8, 1, 0, 15), timedelta(minutes=5))
 
     def test_before_first_scan(self):
         times = _t64(datetime(2026, 8, 1, 12, 0))
-        assert not ring._has_scan_near(times, datetime(2026, 8, 1, 0, 0),
-                                       timedelta(minutes=5))
+        assert not ring._has_scan_near(times, datetime(2026, 8, 1, 0, 0), timedelta(minutes=5))
 
     def test_empty_is_never_available(self):
         assert not ring._has_scan_near(
-            np.array([], dtype="datetime64[ns]"),
-            datetime(2026, 8, 1, 0, 0), timedelta(minutes=5))
+            np.array([], dtype="datetime64[ns]"), datetime(2026, 8, 1, 0, 0), timedelta(minutes=5)
+        )
 
 
 class TestFilterToCommonTimes:
@@ -284,15 +299,13 @@ class TestFilterToCommonTimes:
 
     def _every_10min(self, n=10, skip=()):
         base = datetime(2026, 8, 1, 0, 0)
-        return _t64(*[base + timedelta(minutes=10 * i)
-                      for i in range(n) if i not in skip])
+        return _t64(*[base + timedelta(minutes=10 * i) for i in range(n) if i not in skip])
 
     def test_all_present_keeps_everything(self, stub_availability):
         stub_availability["goes19"] = self._every_10min()
         stub_availability["gk2a"] = self._every_10min()
         candidates = [datetime(2026, 8, 1, 0, 10), datetime(2026, 8, 1, 0, 20)]
-        kept = ring.filter_to_common_times(
-            candidates, ["goes19", "gk2a"], ["C14"], ["C14"])
+        kept = ring.filter_to_common_times(candidates, ["goes19", "gk2a"], ["C14"], ["C14"])
         assert kept == candidates
 
     def test_missing_neighbour_frame_drops_timestamp(self, stub_availability):
@@ -300,18 +313,22 @@ class TestFilterToCommonTimes:
         # and t=00:30 and t=00:40 lose frames too.
         stub_availability["goes19"] = self._every_10min()
         stub_availability["gk2a"] = self._every_10min(skip=(3,))
-        candidates = [datetime(2026, 8, 1, 0, 10), datetime(2026, 8, 1, 0, 20),
-                      datetime(2026, 8, 1, 0, 30), datetime(2026, 8, 1, 0, 40),
-                      datetime(2026, 8, 1, 0, 50)]
-        kept = ring.filter_to_common_times(
-            candidates, ["goes19", "gk2a"], ["C14"], ["C14"])
+        candidates = [
+            datetime(2026, 8, 1, 0, 10),
+            datetime(2026, 8, 1, 0, 20),
+            datetime(2026, 8, 1, 0, 30),
+            datetime(2026, 8, 1, 0, 40),
+            datetime(2026, 8, 1, 0, 50),
+        ]
+        kept = ring.filter_to_common_times(candidates, ["goes19", "gk2a"], ["C14"], ["C14"])
         assert kept == [datetime(2026, 8, 1, 0, 10), datetime(2026, 8, 1, 0, 50)]
 
     def test_satellite_with_no_data_drops_all(self, stub_availability):
         stub_availability["goes19"] = self._every_10min()
         stub_availability["gk2a"] = np.array([], dtype="datetime64[ns]")
         kept = ring.filter_to_common_times(
-            [datetime(2026, 8, 1, 0, 10)], ["goes19", "gk2a"], ["C14"], ["C14"])
+            [datetime(2026, 8, 1, 0, 10)], ["goes19", "gk2a"], ["C14"], ["C14"]
+        )
         assert kept == []
 
     def test_offset_scan_schedule_still_matches(self, stub_availability):
@@ -319,24 +336,31 @@ class TestFilterToCommonTimes:
         base = datetime(2026, 8, 1, 0, 0, 0)
         stub_availability["goes19"] = self._every_10min()
         stub_availability["gk2a"] = _t64(
-            *[base + timedelta(minutes=10 * i, seconds=-25) for i in range(1, 6)])
+            *[base + timedelta(minutes=10 * i, seconds=-25) for i in range(1, 6)]
+        )
         kept = ring.filter_to_common_times(
-            [datetime(2026, 8, 1, 0, 20)], ["goes19", "gk2a"], ["C14"], ["C14"])
+            [datetime(2026, 8, 1, 0, 20)], ["goes19", "gk2a"], ["C14"], ["C14"]
+        )
         assert kept == [datetime(2026, 8, 1, 0, 20)]
 
     def test_tolerance_is_respected(self, stub_availability):
         base = datetime(2026, 8, 1, 0, 0)
         stub_availability["goes19"] = self._every_10min()
         # Offset by 4 minutes: inside a 5 min tolerance, outside a 2 min one.
-        stub_availability["gk2a"] = _t64(
-            *[base + timedelta(minutes=10 * i + 4) for i in range(5)])
+        stub_availability["gk2a"] = _t64(*[base + timedelta(minutes=10 * i + 4) for i in range(5)])
         candidates = [datetime(2026, 8, 1, 0, 20)]
-        assert ring.filter_to_common_times(
-            candidates, ["goes19", "gk2a"], ["C14"], ["C14"],
-            tolerance_min=5.0) == candidates
-        assert ring.filter_to_common_times(
-            candidates, ["goes19", "gk2a"], ["C14"], ["C14"],
-            tolerance_min=2.0) == []
+        assert (
+            ring.filter_to_common_times(
+                candidates, ["goes19", "gk2a"], ["C14"], ["C14"], tolerance_min=5.0
+            )
+            == candidates
+        )
+        assert (
+            ring.filter_to_common_times(
+                candidates, ["goes19", "gk2a"], ["C14"], ["C14"], tolerance_min=2.0
+            )
+            == []
+        )
 
     def test_band_the_satellite_lacks_is_not_used(self, monkeypatch):
         """MTG has no C14; availability must fall back to a band it carries."""
@@ -348,13 +372,13 @@ class TestFilterToCommonTimes:
 
         monkeypatch.setattr(ring, "satellite_available_times", fake)
         ring.filter_to_common_times(
-            [datetime(2026, 8, 1, 0, 20)], ["mtg-i1"], ["C14", "C10"], ["C14"])
+            [datetime(2026, 8, 1, 0, 20)], ["mtg-i1"], ["C14", "C10"], ["C14"]
+        )
         assert asked == ["C10"]
 
     def test_satellite_with_no_usable_band_raises(self):
         with pytest.raises(RuntimeError, match="none of the requested bands"):
-            ring.filter_to_common_times(
-                [datetime(2026, 8, 1, 0, 20)], ["mtg-i1"], ["C14"], ["C14"])
+            ring.filter_to_common_times([datetime(2026, 8, 1, 0, 20)], ["mtg-i1"], ["C14"], ["C14"])
 
     def test_empty_candidate_list_is_passed_through(self):
         assert ring.filter_to_common_times([], ["goes19"], ["C14"], ["C14"]) == []
@@ -373,21 +397,23 @@ class TestAvailabilityBand:
 
 # ── Mosaic memory behaviour ───────────────────────────────────────────
 
+
 class TestGlobalMosaic:
     """The mosaic accumulates satellites one at a time and stores codes."""
 
     def _sat(self, sat_id, zenith, lon0=0.0, n=6):
-        lat, lon = np.meshgrid(np.linspace(-10, 10, n),
-                               np.linspace(lon0 - 10, lon0 + 10, n),
-                               indexing="ij")
+        lat, lon = np.meshgrid(
+            np.linspace(-10, 10, n), np.linspace(lon0 - 10, lon0 + 10, n), indexing="ij"
+        )
         data = {v: np.full((n, n), 1.0, np.float32) for v in ring.OUTPUT_VARS}
         data["quality_flag"] = np.full((n, n), 2.0, np.float32)
         return xr.Dataset(
             {v: (("y", "x"), data[v]) for v in ring.OUTPUT_VARS},
-            coords={"latitude": (("y", "x"), lat.astype(np.float32)),
-                    "longitude": (("y", "x"), lon.astype(np.float32)),
-                    "zenith_angle": (("y", "x"),
-                                     np.full((n, n), zenith, np.float32))},
+            coords={
+                "latitude": (("y", "x"), lat.astype(np.float32)),
+                "longitude": (("y", "x"), lon.astype(np.float32)),
+                "zenith_angle": (("y", "x"), np.full((n, n), zenith, np.float32)),
+            },
             attrs={"satellite_id": sat_id, "time": "2026-08-01T00:00:00"},
         )
 
@@ -415,7 +441,7 @@ class TestGlobalMosaic:
     def test_lowest_zenith_wins_the_overlap(self):
         mosaic = ring.GlobalMosaic(resolution_m=200_000.0)
         mosaic.add("far", self._sat("far", 40.0))
-        mosaic.add("near", self._sat("near", 5.0))      # same footprint
+        mosaic.add("near", self._sat("near", 5.0))  # same footprint
         names = ring.decode_source_satellite(mosaic.to_dataset())
         assert set(names[names != ""]) == {"near"}
 
@@ -428,7 +454,8 @@ class TestGlobalMosaic:
         b.add("far", self._sat("far", 40.0))
         assert np.array_equal(
             ring.decode_source_satellite(a.to_dataset()),
-            ring.decode_source_satellite(b.to_dataset()))
+            ring.decode_source_satellite(b.to_dataset()),
+        )
 
     def test_matches_the_dict_api(self):
         """merge_global is the same accumulator, fed from a dict."""
@@ -439,8 +466,7 @@ class TestGlobalMosaic:
             mosaic.add(k, v)
         streamed = mosaic.to_dataset()
         for var in ring.OUTPUT_VARS:
-            assert np.array_equal(merged[var].values, streamed[var].values,
-                                  equal_nan=True)
+            assert np.array_equal(merged[var].values, streamed[var].values, equal_nan=True)
 
     def test_empty_satellite_is_skipped(self):
         mosaic = ring.GlobalMosaic(resolution_m=200_000.0)
@@ -502,8 +528,7 @@ class TestMosaicGrid:
         lat = rng.uniform(-89.9, 89.9, 200_000).astype(np.float32)
         n_lat = len(mosaic.lat_centers)
         expected = np.clip(np.digitize(lat, mosaic.lat_bins) - 1, 0, n_lat - 1)
-        assert np.array_equal(
-            mosaic._bin_index(lat, mosaic.lat_bins[0], n_lat), expected)
+        assert np.array_equal(mosaic._bin_index(lat, mosaic.lat_bins[0], n_lat), expected)
 
     def test_points_on_a_cell_edge_land_in_that_cell(self):
         mosaic = ring.GlobalMosaic(resolution_m=10000.0)
@@ -521,6 +546,7 @@ class TestMosaicGrid:
 
 # ── Degraded-quality notes ────────────────────────────────────────────
 
+
 class TestQualityAttrs:
     """Zero-filled channels still produce winds, so the shortfall is recorded."""
 
@@ -535,16 +561,17 @@ class TestQualityAttrs:
 
     def test_a_couple_missing_is_recorded_but_not_degraded(self):
         """SEVIRI always lacks C04/C06 and FCI C09/C14 — that is normal."""
-        attrs = ring.quality_attrs(self.FLOW, self.RAD,
-                                   {"flow": ["C09"], "rad": ["C09"]})
+        attrs = ring.quality_attrs(self.FLOW, self.RAD, {"flow": ["C09"], "rad": ["C09"]})
         assert attrs["quality_degraded"] == 0
         assert attrs["bands_missing"] == "C09"
         assert "DEGRADED" not in attrs["quality_note"]
 
     def test_losing_most_bands_is_degraded(self):
         """MTG on mtg_highres_1000m has only ir_105 and ir_38."""
-        gone = {"flow": ["C08", "C09", "C10", "C12"],
-                "rad": ["C08", "C09", "C10", "C11", "C12", "C15", "C16"]}
+        gone = {
+            "flow": ["C08", "C09", "C10", "C12"],
+            "rad": ["C08", "C09", "C10", "C11", "C12", "C15", "C16"],
+        }
         attrs = ring.quality_attrs(self.FLOW, self.RAD, gone)
         assert attrs["quality_degraded"] == 1
         assert attrs["quality_note"].startswith("DEGRADED QUALITY")
@@ -553,43 +580,41 @@ class TestQualityAttrs:
     def test_the_threshold_is_a_fraction_of_what_was_asked_for(self):
         few = ["C08", "C14"]
         attrs = ring.quality_attrs(few, [], {"flow": ["C08"], "rad": []})
-        assert attrs["quality_degraded"] == 1      # one of two is 50%
+        assert attrs["quality_degraded"] == 1  # one of two is 50%
 
     def test_flow_band_losses_are_called_out_separately(self):
-        attrs = ring.quality_attrs(self.FLOW, self.RAD,
-                                   {"flow": ["C08"], "rad": ["C13"]})
+        attrs = ring.quality_attrs(self.FLOW, self.RAD, {"flow": ["C08"], "rad": ["C13"]})
         assert attrs["flow_bands_missing"] == "C08"
         assert set(attrs["bands_missing"].split(",")) == {"C08", "C13"}
 
     def test_a_band_in_both_lists_counts_once_toward_the_threshold(self):
         """FCI lacks C09 and C14 — 2 of 10 distinct bands, not 4 of 15."""
         attrs = ring.quality_attrs(
-            self.FLOW, self.RAD,
-            {"flow": ["C09", "C14"], "rad": ["C09", "C14"]})
+            self.FLOW, self.RAD, {"flow": ["C09", "C14"], "rad": ["C09", "C14"]}
+        )
         assert attrs["n_bands_requested"] == 10
         assert attrs["n_bands_missing"] == 2
         assert attrs["quality_degraded"] == 0
 
     def test_counts_are_deduplicated_across_flow_and_rad(self):
-        attrs = ring.quality_attrs(self.FLOW, self.RAD,
-                                   {"flow": ["C09"], "rad": ["C09"]})
+        attrs = ring.quality_attrs(self.FLOW, self.RAD, {"flow": ["C09"], "rad": ["C09"]})
         assert attrs["n_bands_missing"] == 1
 
 
 class TestMosaicQuality:
     def _sat(self, sat_id, zenith=10.0, n=6, **quality):
-        lat, lon = np.meshgrid(np.linspace(-10, 10, n), np.linspace(-10, 10, n),
-                               indexing="ij")
+        lat, lon = np.meshgrid(np.linspace(-10, 10, n), np.linspace(-10, 10, n), indexing="ij")
         data = {v: np.full((n, n), 1.0, np.float32) for v in ring.OUTPUT_VARS}
         data["quality_flag"] = np.full((n, n), 2.0, np.float32)
         return xr.Dataset(
             {v: (("y", "x"), data[v]) for v in ring.OUTPUT_VARS},
-            coords={"latitude": (("y", "x"), lat.astype(np.float32)),
-                    "longitude": (("y", "x"), lon.astype(np.float32)),
-                    "zenith_angle": (("y", "x"),
-                                     np.full((n, n), zenith, np.float32))},
-            attrs={"satellite_id": sat_id, "time": "2026-08-01T00:00:00",
-                   **quality})
+            coords={
+                "latitude": (("y", "x"), lat.astype(np.float32)),
+                "longitude": (("y", "x"), lon.astype(np.float32)),
+                "zenith_angle": (("y", "x"), np.full((n, n), zenith, np.float32)),
+            },
+            attrs={"satellite_id": sat_id, "time": "2026-08-01T00:00:00", **quality},
+        )
 
     def test_clean_mosaic_says_so(self):
         mosaic = ring.GlobalMosaic(resolution_m=200_000.0)
@@ -600,9 +625,16 @@ class TestMosaicQuality:
 
     def test_a_degraded_contributor_is_named(self):
         mosaic = ring.GlobalMosaic(resolution_m=200_000.0)
-        mosaic.add("mtg-i1", self._sat(
-            "mtg-i1", bands_missing="C08,C09,C10", n_bands_missing=3,
-            n_bands_requested=15, quality_degraded=1))
+        mosaic.add(
+            "mtg-i1",
+            self._sat(
+                "mtg-i1",
+                bands_missing="C08,C09,C10",
+                n_bands_missing=3,
+                n_bands_requested=15,
+                quality_degraded=1,
+            ),
+        )
         attrs = mosaic.to_dataset().attrs
         assert attrs["quality_degraded"] == 1
         assert attrs["degraded_satellites"] == "mtg-i1"
@@ -611,29 +643,78 @@ class TestMosaicQuality:
 
     def test_missing_but_not_degraded_is_reported_without_alarm(self):
         mosaic = ring.GlobalMosaic(resolution_m=200_000.0)
-        mosaic.add("msg-iodc", self._sat(
-            "msg-iodc", bands_missing="C04,C06", n_bands_missing=2,
-            n_bands_requested=15, quality_degraded=0))
+        mosaic.add(
+            "msg-iodc",
+            self._sat(
+                "msg-iodc",
+                bands_missing="C04,C06",
+                n_bands_missing=2,
+                n_bands_requested=15,
+                quality_degraded=0,
+            ),
+        )
         attrs = mosaic.to_dataset().attrs
         assert attrs["quality_degraded"] == 0
         assert "msg-iodc: 2/15 bands missing" in attrs["quality_note"]
 
     def test_a_satellite_that_won_no_cells_is_not_reported(self):
         mosaic = ring.GlobalMosaic(resolution_m=200_000.0)
-        blank = self._sat("mtg-i1", n_bands_missing=9, n_bands_requested=15,
-                          quality_degraded=1, bands_missing="C08")
-        blank["quality_flag"][:] = 0.0          # contributes nothing
+        blank = self._sat(
+            "mtg-i1",
+            n_bands_missing=9,
+            n_bands_requested=15,
+            quality_degraded=1,
+            bands_missing="C08",
+        )
+        blank["quality_flag"][:] = 0.0  # contributes nothing
         mosaic.add("mtg-i1", blank)
         mosaic.add("goes19", self._sat("goes19"))
         assert mosaic.to_dataset().attrs["quality_degraded"] == 0
 
     def test_quality_survives_the_netcdf_round_trip(self, tmp_path):
         mosaic = ring.GlobalMosaic(resolution_m=200_000.0)
-        mosaic.add("mtg-i1", self._sat(
-            "mtg-i1", bands_missing="C08,C09", n_bands_missing=2,
-            n_bands_requested=15, quality_degraded=1))
+        mosaic.add(
+            "mtg-i1",
+            self._sat(
+                "mtg-i1",
+                bands_missing="C08,C09",
+                n_bands_missing=2,
+                n_bands_requested=15,
+                quality_degraded=1,
+            ),
+        )
         path = tmp_path / "m.nc"
         mosaic.to_dataset().to_netcdf(path)
         back = xr.open_dataset(path)
         assert back.attrs["quality_degraded"] == 1
         assert "DEGRADED" in back.attrs["quality_note"]
+
+
+class TestDecodeWithoutFlagMeanings:
+    """Decoding falls back to the ``satellites`` attribute correctly."""
+
+    @staticmethod
+    def _mosaic(satellites_attr):
+        index = np.array([[0, 1], [1, -1]], dtype="int8")
+        ds = xr.Dataset({"source_satellite_index": (("y", "x"), index)})
+        ds.attrs["satellites"] = satellites_attr
+        return ds
+
+    def test_a_comma_separated_attribute_decodes_to_whole_names(self):
+        """A file round trip turns the list into a string.
+
+        ``list()`` on that string yields its characters, so every cell
+        decoded to a single letter.
+        """
+        names = ring.decode_source_satellite(self._mosaic("goes18,goes19"))
+        assert set(names.ravel()) == {"goes18", "goes19", ""}
+
+    def test_a_list_attribute_still_decodes(self):
+        names = ring.decode_source_satellite(self._mosaic(["goes18", "goes19"]))
+        assert set(names.ravel()) == {"goes18", "goes19", ""}
+
+    def test_flag_meanings_wins_when_present(self):
+        ds = self._mosaic("wrong,also-wrong")
+        ds["source_satellite_index"].attrs["flag_meanings"] = "goes18 goes19"
+        names = ring.decode_source_satellite(ds)
+        assert set(names.ravel()) == {"goes18", "goes19", ""}

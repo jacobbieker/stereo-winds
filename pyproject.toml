@@ -76,6 +76,11 @@ dev = [
     "pytest>=7.0",
     "pyproj>=3.5",
 ]
+operational = [
+    # Dagster orchestrates the operational AMV pipeline (operational/).
+    "dagster>=1.13",
+    "dagster-webserver>=1.13",
+]
 
 [tool.pytest.ini_options]
 markers = [
@@ -84,8 +89,12 @@ markers = [
     "integration_live: student model + live icechunk data (requires checkpoint + network)",
 ]
 
+[tool.black]
+line-length = 100
+
 [tool.setuptools.packages.find]
-include = ["stereo_winds*"]
+include = ["stereo_winds*", "operational*"]
+exclude = ["operational.tests*"]
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]
@@ -97,6 +106,7 @@ stereo-winds = { path = ".", editable = true }
 [tool.pixi.environments]
 default = { solve-group = "default" }
 dev = { features = ["dev"], solve-group = "default" }
+operational = { features = ["operational"], solve-group = "default" }
 train = { features = ["train"], solve-group = "default" }
 validation = { features = ["validation"], solve-group = "default" }
 viz = { features = ["viz"], solve-group = "default" }
