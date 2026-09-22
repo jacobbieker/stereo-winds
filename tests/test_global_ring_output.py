@@ -242,6 +242,160 @@ class TestIcechunkOutput:
         assert max(chunks[1:]) <= 64
 
 
+class TestScratchFolder:
+    """Per-satellite mosaics are intermediates when --temp-dir is set."""
+
+    def _scratches(self, temp_dir):
+        return [p for p in Path(temp_dir).iterdir() if p.name.startswith(ring.SCRATCH_PREFIX)]
+
+    def test_satellites_land_in_scratch_not_output_dir(
+        self, tmp_path, repo, stub_infer, monkeypatch
+    ):
+        temp_dir, out = tmp_path / "tmp", tmp_path / "out"
+        seen: list[Path] = []
+        real = ring.make_scratch_dir
+
+        def spy(root, t):
+            d = real(root, t)
+            seen.append(d)
+            return d
+
+        monkeypatch.setattr(ring, "make_scratch_dir", spy)
+        # Capture what existed inside the scratch folder before cleanup.
+        contents: list[list[str]] = []
+        real_remove = ring.remove_scratch_dir
+        monkeypatch.setattr(
+            ring,
+            "remove_scratch_dir",
+            lambda d: (
+                contents.append(sorted(p.name for p in Path(d).rglob("*.nc"))),
+                real_remove(d),
+            ),
+        )
+
+        _run(T0, out, repo=repo, icechunk_times=set(), temp_dir=temp_dir, global_netcdf=False)
+
+        assert contents == [
+            ["student_amv_goes18_20260801T0000.nc", "student_amv_goes19_20260801T0000.nc"]
+        ]
+        assert len(seen) == 1
+        # Nothing persisted: not the satellites, not the mosaic.
+        assert list(out.rglob("*.nc")) == []
+
+    def test_scratch_removed_after_commit(self, tmp_path, repo, stub_infer):
+        temp_dir = tmp_path / "tmp"
+        _run(
+            T0,
+            tmp_path / "out",
+            repo=repo,
+            icechunk_times=set(),
+            temp_dir=temp_dir,
+            global_netcdf=False,
+        )
+        assert self._scratches(temp_dir) == []
+        # The mosaic itself survived the cleanup.
+        assert _store_ds(repo).sizes["time"] == 1
+
+    def test_scratch_removed_for_every_timestamp(self, tmp_path, repo, stub_infer):
+        temp_dir = tmp_path / "tmp"
+        seen: set[datetime] = set()
+        times = ring.time_steps(T0, T0 + timedelta(minutes=20), 10)
+        for t in times:
+            _run(
+                t,
+                tmp_path / "out",
+                repo=repo,
+                icechunk_times=seen,
+                temp_dir=temp_dir,
+                global_netcdf=False,
+            )
+        assert self._scratches(temp_dir) == []
+        assert _store_ds(repo).sizes["time"] == len(times)
+
+    def test_scratch_removed_when_the_timestamp_fails(self, tmp_path, repo, monkeypatch):
+        """A failed timestamp must not leave its disks behind either."""
+
+        def boom(*a, **k):
+            raise RuntimeError("simulated loader failure")
+
+        monkeypatch.setattr(ring, "infer_satellite", boom)
+        temp_dir = tmp_path / "tmp"
+        assert (
+            _run(
+                T0,
+                tmp_path / "out",
+                repo=repo,
+                icechunk_times=set(),
+                temp_dir=temp_dir,
+                global_netcdf=False,
+            )
+            is False
+        )
+        assert self._scratches(temp_dir) == []
+
+    def test_keep_temp_retains_the_folder(self, tmp_path, repo, stub_infer):
+        temp_dir = tmp_path / "tmp"
+        _run(
+            T0,
+            tmp_path / "out",
+            repo=repo,
+            icechunk_times=set(),
+            temp_dir=temp_dir,
+            global_netcdf=False,
+            keep_temp=True,
+        )
+        kept = self._scratches(temp_dir)
+        assert len(kept) == 1
+        assert sorted(p.name for p in kept[0].rglob("*.nc")) == [
+            "student_amv_goes18_20260801T0000.nc",
+            "student_amv_goes19_20260801T0000.nc",
+        ]
+
+    def test_concurrent_timestamps_get_separate_folders(self, tmp_path):
+        temp_dir = tmp_path / "tmp"
+        a = ring.make_scratch_dir(temp_dir, T0)
+        b = ring.make_scratch_dir(temp_dir, T0)
+        assert a != b
+        assert ring.time_tag(T0) in a.name and ring.time_tag(T0) in b.name
+
+    def test_remove_is_quiet_when_already_gone(self, tmp_path):
+        d = ring.make_scratch_dir(tmp_path, T0)
+        ring.remove_scratch_dir(d)
+        ring.remove_scratch_dir(d)  # must not raise
+        assert not d.exists()
+
+    def test_skip_global_keeps_its_only_output(self, tmp_path, stub_infer):
+        """With no mosaic to commit, per-satellite files are the deliverable."""
+        temp_dir, out = tmp_path / "tmp", tmp_path / "out"
+        _run(T0, out, temp_dir=temp_dir, skip_global=True)
+        assert ring.sat_nc_path(out, "goes18", T0).exists()
+        assert not temp_dir.exists()
+
+    def test_no_scratch_without_temp_dir(self, tmp_path, repo, stub_infer):
+        """Without --temp-dir the old layout is untouched."""
+        _run(T0, tmp_path, repo=repo, icechunk_times=set())
+        assert ring.sat_nc_path(tmp_path, "goes18", T0).exists()
+        assert ring.global_nc_path(tmp_path, T0).exists()
+
+    def test_skip_existing_resumes_from_the_store_not_the_scratch(self, tmp_path, repo, stub_infer):
+        """Deleted scratch files must not look like work still to do."""
+        temp_dir, out = tmp_path / "tmp", tmp_path / "out"
+        seen: set[datetime] = set()
+        _run(T0, out, repo=repo, icechunk_times=seen, temp_dir=temp_dir, global_netcdf=False)
+        n_before = len(stub_infer)
+        _run(
+            T0,
+            out,
+            repo=repo,
+            icechunk_times=seen,
+            temp_dir=temp_dir,
+            global_netcdf=False,
+            skip_existing=True,
+        )
+        assert len(stub_infer) == n_before
+        assert _store_ds(repo).sizes["time"] == 1
+
+
 class TestIcechunkStorage:
     def test_s3_uri_parsed(self):
         pytest.importorskip("icechunk")
