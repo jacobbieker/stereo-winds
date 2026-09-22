@@ -63,7 +63,7 @@ def _as_int(value: Any, default: int = 0) -> int:
         return default
     try:
         return int(value)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         logger.warning("Ignoring unparsable quality attr %r", value)
         return default
 
@@ -83,7 +83,7 @@ def _as_flag(value: Any) -> bool:
         return False
     try:
         return bool(int(value))
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         logger.warning("Unreadable quality_degraded attr %r — treating as degraded", value)
         return True
 
