@@ -1,0 +1,18 @@
+# Keep the build context to the package, the inference script and the
+# checkpoints the container actually runs.
+*
+!pyproject.toml
+!pixi.lock
+!README.md
+!LICENSE
+!NOTICE
+!stereo_winds/
+!operational/
+!scripts/infer_student_global_ring.py
+!docker/entrypoint.sh
+!checkpoints/student.abi.mb-v3.ep21.ckpt
+!checkpoints/windflow.raft.sonde-tuned.ckpt
+
+**/__pycache__
+**/*.py[cod]
+operational/tests
