@@ -136,7 +136,7 @@ def _decode_cursor(raw: str | None) -> dict[str, datetime]:
     try:
         payload = json.loads(raw)
         items = payload["watermarks"]
-    except ValueError, TypeError, KeyError:
+    except (ValueError, TypeError, KeyError):
         logger.warning("Ignoring unparseable sensor cursor %r", raw)
         return {}
     out: dict[str, datetime] = {}
