@@ -87,7 +87,7 @@ def _sat_names(value) -> list[str]:
     if text.startswith("[") and text.endswith("]"):
         try:
             parsed = ast.literal_eval(text)
-        except ValueError, SyntaxError:
+        except (ValueError, SyntaxError):
             parsed = None
         if isinstance(parsed, (list, tuple)):
             return [str(v) for v in parsed]
