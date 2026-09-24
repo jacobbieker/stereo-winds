@@ -235,7 +235,9 @@ class TestStudentLiveInference:
         )
 
     def test_mtg(self):
+        # MTG-I1's archive starts 2024-09-24, months after the 2024-01-15
+        # the other live tests use, so this one needs a date of its own.
         self._run_student_on_sat(
             "mtg-i1", MTG_I1_CONFIG, "ir_105",
-            dt.datetime(2024, 6, 15, 12, 0),
+            dt.datetime(2025, 1, 15, 12, 0),
         )
