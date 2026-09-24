@@ -326,7 +326,7 @@ class TestParallaxRemapConsistency:
             xa_remap, ya_remap = geodetic_to_fixed_grid(
                 lat_remap, lon_remap, sat_a, h_m=0.0
             )
-            w_u = float((xa_remap - xa_0) - (xa_h - xa_0)) / sat_a.scale_x / dh
+            w_u = ((xa_remap - xa_0) - (xa_h - xa_0)).item() / sat_a.scale_x / dh
 
             # Compute the "true" displacement at h_test through the full geometry
             xb_full, yb_full = geodetic_to_fixed_grid(
@@ -339,9 +339,9 @@ class TestParallaxRemapConsistency:
             xa_h_full, ya_h_full = geodetic_to_fixed_grid(
                 lat_a, lon_a, sat_a, h_m=h_test
             )
-            true_par_u = float(
+            true_par_u = (
                 (xa_r_full - xa_0) - (xa_h_full - xa_0)
-            ) / sat_a.scale_x
+            ).item() / sat_a.scale_x
             predicted_par_u = h_test * w_u
 
             # Height error should be < 1% (linearization error only)
