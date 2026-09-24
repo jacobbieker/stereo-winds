@@ -41,6 +41,7 @@ RUN chmod +x /usr/local/bin/entrypoint.sh \
  && bash -c 'source /activate.sh && python -c "from stereo_winds.disparity import _ensure_compat_checkpoint as f; f(\"/app/checkpoints/windflow.raft.sonde-tuned.ckpt\")"'
 
 ENV AMV_OUTPUT_DIR=/output \
+    AMV_TEMP_DIR=/output \
     AMV_DEVICE=cuda \
     AMV_STUDENT_CKPT=/app/checkpoints/student.abi.mb-v3.ep21.ckpt \
     AMV_RAFT_CKPT=/app/checkpoints/windflow.raft.sonde-tuned.ckpt \

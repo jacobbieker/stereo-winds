@@ -242,6 +242,160 @@ class TestIcechunkOutput:
         assert max(chunks[1:]) <= 64
 
 
+class TestScratchFolder:
+    """Per-satellite mosaics are intermediates when --temp-dir is set."""
+
+    def _scratches(self, temp_dir):
+        return [p for p in Path(temp_dir).iterdir() if p.name.startswith(ring.SCRATCH_PREFIX)]
+
+    def test_satellites_land_in_scratch_not_output_dir(
+        self, tmp_path, repo, stub_infer, monkeypatch
+    ):
+        temp_dir, out = tmp_path / "tmp", tmp_path / "out"
+        seen: list[Path] = []
+        real = ring.make_scratch_dir
+
+        def spy(root, t):
+            d = real(root, t)
+            seen.append(d)
+            return d
+
+        monkeypatch.setattr(ring, "make_scratch_dir", spy)
+        # Capture what existed inside the scratch folder before cleanup.
+        contents: list[list[str]] = []
+        real_remove = ring.remove_scratch_dir
+        monkeypatch.setattr(
+            ring,
+            "remove_scratch_dir",
+            lambda d: (
+                contents.append(sorted(p.name for p in Path(d).rglob("*.nc"))),
+                real_remove(d),
+            ),
+        )
+
+        _run(T0, out, repo=repo, icechunk_times=set(), temp_dir=temp_dir, global_netcdf=False)
+
+        assert contents == [
+            ["student_amv_goes18_20260801T0000.nc", "student_amv_goes19_20260801T0000.nc"]
+        ]
+        assert len(seen) == 1
+        # Nothing persisted: not the satellites, not the mosaic.
+        assert list(out.rglob("*.nc")) == []
+
+    def test_scratch_removed_after_commit(self, tmp_path, repo, stub_infer):
+        temp_dir = tmp_path / "tmp"
+        _run(
+            T0,
+            tmp_path / "out",
+            repo=repo,
+            icechunk_times=set(),
+            temp_dir=temp_dir,
+            global_netcdf=False,
+        )
+        assert self._scratches(temp_dir) == []
+        # The mosaic itself survived the cleanup.
+        assert _store_ds(repo).sizes["time"] == 1
+
+    def test_scratch_removed_for_every_timestamp(self, tmp_path, repo, stub_infer):
+        temp_dir = tmp_path / "tmp"
+        seen: set[datetime] = set()
+        times = ring.time_steps(T0, T0 + timedelta(minutes=20), 10)
+        for t in times:
+            _run(
+                t,
+                tmp_path / "out",
+                repo=repo,
+                icechunk_times=seen,
+                temp_dir=temp_dir,
+                global_netcdf=False,
+            )
+        assert self._scratches(temp_dir) == []
+        assert _store_ds(repo).sizes["time"] == len(times)
+
+    def test_scratch_removed_when_the_timestamp_fails(self, tmp_path, repo, monkeypatch):
+        """A failed timestamp must not leave its disks behind either."""
+
+        def boom(*a, **k):
+            raise RuntimeError("simulated loader failure")
+
+        monkeypatch.setattr(ring, "infer_satellite", boom)
+        temp_dir = tmp_path / "tmp"
+        assert (
+            _run(
+                T0,
+                tmp_path / "out",
+                repo=repo,
+                icechunk_times=set(),
+                temp_dir=temp_dir,
+                global_netcdf=False,
+            )
+            is False
+        )
+        assert self._scratches(temp_dir) == []
+
+    def test_keep_temp_retains_the_folder(self, tmp_path, repo, stub_infer):
+        temp_dir = tmp_path / "tmp"
+        _run(
+            T0,
+            tmp_path / "out",
+            repo=repo,
+            icechunk_times=set(),
+            temp_dir=temp_dir,
+            global_netcdf=False,
+            keep_temp=True,
+        )
+        kept = self._scratches(temp_dir)
+        assert len(kept) == 1
+        assert sorted(p.name for p in kept[0].rglob("*.nc")) == [
+            "student_amv_goes18_20260801T0000.nc",
+            "student_amv_goes19_20260801T0000.nc",
+        ]
+
+    def test_concurrent_timestamps_get_separate_folders(self, tmp_path):
+        temp_dir = tmp_path / "tmp"
+        a = ring.make_scratch_dir(temp_dir, T0)
+        b = ring.make_scratch_dir(temp_dir, T0)
+        assert a != b
+        assert ring.time_tag(T0) in a.name and ring.time_tag(T0) in b.name
+
+    def test_remove_is_quiet_when_already_gone(self, tmp_path):
+        d = ring.make_scratch_dir(tmp_path, T0)
+        ring.remove_scratch_dir(d)
+        ring.remove_scratch_dir(d)  # must not raise
+        assert not d.exists()
+
+    def test_skip_global_keeps_its_only_output(self, tmp_path, stub_infer):
+        """With no mosaic to commit, per-satellite files are the deliverable."""
+        temp_dir, out = tmp_path / "tmp", tmp_path / "out"
+        _run(T0, out, temp_dir=temp_dir, skip_global=True)
+        assert ring.sat_nc_path(out, "goes18", T0).exists()
+        assert not temp_dir.exists()
+
+    def test_no_scratch_without_temp_dir(self, tmp_path, repo, stub_infer):
+        """Without --temp-dir the old layout is untouched."""
+        _run(T0, tmp_path, repo=repo, icechunk_times=set())
+        assert ring.sat_nc_path(tmp_path, "goes18", T0).exists()
+        assert ring.global_nc_path(tmp_path, T0).exists()
+
+    def test_skip_existing_resumes_from_the_store_not_the_scratch(self, tmp_path, repo, stub_infer):
+        """Deleted scratch files must not look like work still to do."""
+        temp_dir, out = tmp_path / "tmp", tmp_path / "out"
+        seen: set[datetime] = set()
+        _run(T0, out, repo=repo, icechunk_times=seen, temp_dir=temp_dir, global_netcdf=False)
+        n_before = len(stub_infer)
+        _run(
+            T0,
+            out,
+            repo=repo,
+            icechunk_times=seen,
+            temp_dir=temp_dir,
+            global_netcdf=False,
+            skip_existing=True,
+        )
+        assert len(stub_infer) == n_before
+        assert _store_ds(repo).sizes["time"] == 1
+
+
 class TestIcechunkStorage:
     def test_s3_uri_parsed(self):
         pytest.importorskip("icechunk")
@@ -718,3 +872,62 @@ class TestDecodeWithoutFlagMeanings:
         ds["source_satellite_index"].attrs["flag_meanings"] = "goes18 goes19"
         names = ring.decode_source_satellite(ds)
         assert set(names.ravel()) == {"goes18", "goes19", ""}
+
+
+# ── Speed quality control ─────────────────────────────────────────────
+
+
+class TestSpeedQualityControl:
+    """An unphysical wind must not keep a high-quality flag.
+
+    The student had no speed cut, so a tracking failure was flagged 2
+    exactly like a good retrieval and passed every `quality_flag >= 2`
+    filter downstream.
+    """
+
+    @staticmethod
+    def _raw(u, v, h_km=8.0, shape=(2, 2)):
+        def field(value):
+            return np.full(shape, value, dtype=np.float64)
+
+        return {
+            "u_mean": field(u),
+            "v_mean": field(v),
+            "h_mean": field(h_km),
+            "u_logvar": field(0.0),
+            "v_logvar": field(0.0),
+            "h_logvar": field(0.0),
+        }
+
+    def _flag(self, u, v):
+        finite = np.ones((2, 2), dtype=bool)
+        out = ring._assemble_vars(self._raw(u, v), finite)
+        return out["quality_flag"]
+
+    def test_plausible_wind_stays_high_quality(self):
+        assert np.all(self._flag(20.0, 15.0) == 2.0)
+
+    def test_wind_over_the_threshold_is_flagged_no_retrieval(self):
+        # 762 m/s is the fastest cell the container mosaic produced.
+        assert np.all(self._flag(762.8, 0.0) == 0.0)
+
+    def test_the_threshold_is_the_shared_constant(self):
+        from stereo_winds.qa import MAX_PLAUSIBLE_SPEED_MS
+
+        assert ring.MAX_PLAUSIBLE_SPEED_MS == MAX_PLAUSIBLE_SPEED_MS
+        assert np.all(self._flag(MAX_PLAUSIBLE_SPEED_MS, 0.0) == 2.0)
+        assert np.all(self._flag(MAX_PLAUSIBLE_SPEED_MS + 0.1, 0.0) == 0.0)
+
+    def test_speed_is_the_vector_magnitude_not_a_component(self):
+        """80 and 80 each pass alone; together they are 113 m/s."""
+        assert np.all(self._flag(80.0, 0.0) == 2.0)
+        assert np.all(self._flag(80.0, 80.0) == 0.0)
+
+    def test_the_wind_values_are_left_alone(self):
+        """The teacher flags the cell without rewriting the retrieval."""
+        out = ring._assemble_vars(self._raw(500.0, 0.0), np.ones((2, 2), bool))
+        assert np.all(out["quality_flag"] == 0.0)
+        assert np.all(out["u_wind"] == 500.0)
+
+    def test_a_nan_wind_is_still_no_retrieval(self):
+        assert np.all(self._flag(np.nan, 0.0) == 0.0)

@@ -25,11 +25,14 @@
 #   AMV_ICECHUNK_CHUNK              --icechunk-chunk
 #   AMV_ICECHUNK_ENDPOINT           --icechunk-endpoint
 #   AMV_ICECHUNK_REGION             --icechunk-region
+#   AMV_TEMP_DIR                    --temp-dir       (image default: /output)
 # Flags (true/1/yes to enable):
 #   AMV_SKIP_GLOBAL                 --skip-global
 #   AMV_REQUIRE_ALL_SATELLITES      --require-all-satellites
 #   AMV_SKIP_EXISTING               --skip-existing
 #   AMV_NO_NETCDF                   --no-netcdf
+#   AMV_KEEP_NETCDF                 --keep-netcdf
+#   AMV_KEEP_TEMP                   --keep-temp
 #   AMV_ICECHUNK_ANONYMOUS          --icechunk-anonymous
 #   AMV_ICECHUNK_FORCE_PATH_STYLE   --icechunk-force-path-style
 # Anything else:
@@ -88,11 +91,14 @@ opt AMV_ICECHUNK_BRANCH        --icechunk-branch
 opt AMV_ICECHUNK_CHUNK         --icechunk-chunk
 opt AMV_ICECHUNK_ENDPOINT      --icechunk-endpoint
 opt AMV_ICECHUNK_REGION        --icechunk-region
+opt AMV_TEMP_DIR               --temp-dir
 
 flag AMV_SKIP_GLOBAL               --skip-global
 flag AMV_REQUIRE_ALL_SATELLITES    --require-all-satellites
 flag AMV_SKIP_EXISTING             --skip-existing
 flag AMV_NO_NETCDF                 --no-netcdf
+flag AMV_KEEP_NETCDF               --keep-netcdf
+flag AMV_KEEP_TEMP                 --keep-temp
 flag AMV_ICECHUNK_ANONYMOUS        --icechunk-anonymous
 flag AMV_ICECHUNK_FORCE_PATH_STYLE --icechunk-force-path-style
 
