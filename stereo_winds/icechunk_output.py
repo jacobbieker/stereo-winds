@@ -186,7 +186,7 @@ def _satellites_attr(value) -> str:
 
             try:
                 parsed = ast.literal_eval(text)
-            except ValueError, SyntaxError:
+            except (ValueError, SyntaxError):
                 return text
             if isinstance(parsed, (list, tuple)):
                 return ",".join(str(v) for v in parsed)
