@@ -872,3 +872,62 @@ class TestDecodeWithoutFlagMeanings:
         ds["source_satellite_index"].attrs["flag_meanings"] = "goes18 goes19"
         names = ring.decode_source_satellite(ds)
         assert set(names.ravel()) == {"goes18", "goes19", ""}
+
+
+# ── Speed quality control ─────────────────────────────────────────────
+
+
+class TestSpeedQualityControl:
+    """An unphysical wind must not keep a high-quality flag.
+
+    The student had no speed cut, so a tracking failure was flagged 2
+    exactly like a good retrieval and passed every `quality_flag >= 2`
+    filter downstream.
+    """
+
+    @staticmethod
+    def _raw(u, v, h_km=8.0, shape=(2, 2)):
+        def field(value):
+            return np.full(shape, value, dtype=np.float64)
+
+        return {
+            "u_mean": field(u),
+            "v_mean": field(v),
+            "h_mean": field(h_km),
+            "u_logvar": field(0.0),
+            "v_logvar": field(0.0),
+            "h_logvar": field(0.0),
+        }
+
+    def _flag(self, u, v):
+        finite = np.ones((2, 2), dtype=bool)
+        out = ring._assemble_vars(self._raw(u, v), finite)
+        return out["quality_flag"]
+
+    def test_plausible_wind_stays_high_quality(self):
+        assert np.all(self._flag(20.0, 15.0) == 2.0)
+
+    def test_wind_over_the_threshold_is_flagged_no_retrieval(self):
+        # 762 m/s is the fastest cell the container mosaic produced.
+        assert np.all(self._flag(762.8, 0.0) == 0.0)
+
+    def test_the_threshold_is_the_shared_constant(self):
+        from stereo_winds.qa import MAX_PLAUSIBLE_SPEED_MS
+
+        assert ring.MAX_PLAUSIBLE_SPEED_MS == MAX_PLAUSIBLE_SPEED_MS
+        assert np.all(self._flag(MAX_PLAUSIBLE_SPEED_MS, 0.0) == 2.0)
+        assert np.all(self._flag(MAX_PLAUSIBLE_SPEED_MS + 0.1, 0.0) == 0.0)
+
+    def test_speed_is_the_vector_magnitude_not_a_component(self):
+        """80 and 80 each pass alone; together they are 113 m/s."""
+        assert np.all(self._flag(80.0, 0.0) == 2.0)
+        assert np.all(self._flag(80.0, 80.0) == 0.0)
+
+    def test_the_wind_values_are_left_alone(self):
+        """The teacher flags the cell without rewriting the retrieval."""
+        out = ring._assemble_vars(self._raw(500.0, 0.0), np.ones((2, 2), bool))
+        assert np.all(out["quality_flag"] == 0.0)
+        assert np.all(out["u_wind"] == 500.0)
+
+    def test_a_nan_wind_is_still_no_retrieval(self):
+        assert np.all(self._flag(np.nan, 0.0) == 0.0)

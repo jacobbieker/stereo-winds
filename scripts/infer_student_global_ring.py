@@ -121,6 +121,7 @@ BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
 from stereo_winds.config import SATELLITE_CONFIGS, SatelliteConfig
+from stereo_winds.qa import MAX_PLAUSIBLE_SPEED_MS
 from stereo_winds.readers._satpy_s3 import SceneNotInStore
 from stereo_winds.icechunk_output import (
     icechunk_existing_times,
@@ -1338,6 +1339,13 @@ def _assemble_vars(
         arr[~finite_mask] = np.nan
 
     valid = finite_mask & np.isfinite(u) & np.isfinite(v) & np.isfinite(h_km)
+    # The student had no speed cut at all, so an unphysical retrieval kept
+    # the same flag as a good one: a 20 km global mosaic carried 2445 cells
+    # above 150 m/s, all of them flag 2, and every consumer filtering on
+    # `quality_flag >= 2` took them.  compute_qa_flag already refuses
+    # `speed > MAX_PLAUSIBLE_SPEED_MS` for both of its levels; match it here
+    # so a student mosaic filters the same way a teacher one does.
+    valid &= np.hypot(u, v) <= MAX_PLAUSIBLE_SPEED_MS
     qf = np.where(valid, 2.0, 0.0).astype(np.float32)
     del valid
 

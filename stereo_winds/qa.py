@@ -9,6 +9,14 @@ from __future__ import annotations
 import numpy as np
 from scipy.ndimage import sobel
 
+#: Fastest wind a retrieval is allowed to claim, in m/s.  Above this the
+#: solution is not a wind: the jet-stream record is around 120 m/s and an
+#: AMV that fast is a tracking failure, not weather.  Both QA levels below
+#: require it, and the student path in
+#: ``scripts/infer_student_global_ring.py`` applies the same cut, so a
+#: student mosaic and a teacher one can be filtered the same way.
+MAX_PLAUSIBLE_SPEED_MS = 100.0
+
 
 def height_gradient(h_2d: np.ndarray) -> np.ndarray:
     """Sobel height-gradient magnitude (m/pixel).
@@ -38,9 +46,10 @@ def compute_qa_flag(
     Levels (higher = stricter):
 
     * **0 — no_retrieval**: invalid height, out of zenith range, or failed solve
-    * **1 — low_quality**: basic validity + chi2 ≤ *chi2_threshold* + finite winds
+    * **1 — low_quality**: basic validity + chi2 ≤ *chi2_threshold* + finite
+      winds + speed ≤ ``MAX_PLAUSIBLE_SPEED_MS``
     * **2 — high_quality**: level 1 + chi2 ≤ 0.2, height-dependent sigma_h,
-      height gradient ≤ 3000 m/pixel, speed ≤ 100 m/s
+      height gradient ≤ 3000 m/pixel, speed ≤ ``MAX_PLAUSIBLE_SPEED_MS``
 
     Parameters
     ----------
@@ -64,17 +73,21 @@ def compute_qa_flag(
 
     # Level 1: current pipeline QC
     level1 = (
-        np.isfinite(h) & (h >= 0) & (h <= 20000)
+        np.isfinite(h)
+        & (h >= 0)
+        & (h <= 20000)
         & valid_mask
-        & np.isfinite(u) & np.isfinite(v)
+        & np.isfinite(u)
+        & np.isfinite(v)
         & (chi2 <= chi2_threshold)
-        & (speed <= 100.0)
+        & (speed <= MAX_PLAUSIBLE_SPEED_MS)
     )
     qa[level1] = 1.0
 
     # Level 2: strict QC (matches triple-collocation validation filters)
     sigh_thresh = np.where(
-        h < 3000, 1000.0,
+        h < 3000,
+        1000.0,
         np.where(h < 7000, 2000.0, 1000.0),
     )
     hgrad = height_gradient(h)
@@ -82,7 +95,7 @@ def compute_qa_flag(
         (chi2 <= 0.2)
         & (sigma_h <= sigh_thresh)
         & (hgrad <= 3000.0)
-        & (speed <= 100.0)
+        & (speed <= MAX_PLAUSIBLE_SPEED_MS)
     )
     qa[level2] = 2.0
 
