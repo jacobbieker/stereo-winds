@@ -80,7 +80,7 @@ CONSUMER_SATELLITES: dict[str, ConsumerSatellite] = {
     ),
     "odegree": ConsumerSatellite(
         key="odegree",
-        ring_id=None,
+        ring_id="msg-0deg",
         store="geo/msg_3000m.icechunk",
         resolution_m=3000,
         cadence_mins=15,
