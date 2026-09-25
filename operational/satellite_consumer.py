@@ -17,13 +17,19 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
 import datetime as dt
 from datetime import datetime, timedelta
 
-from dagster import ConfigurableResource, EnvVar
+from dagster import ConfigurableResource
 from pydantic import Field
 
 logger = logging.getLogger(__name__)
+
+_SECRET_HELP = (
+    "Left empty, read from the environment variable of the same name when "
+    "the container runs.  Setting it here puts a live key into run history."
+)
 
 __all__ = [
     "CONSUMER_SATELLITES",
@@ -161,12 +167,19 @@ class SatelliteConsumerResource(ConfigurableResource):
         ),
     )
 
-    # Read from the environment rather than accepted as config: config
-    # values are echoed into run history and the Dagster UI.
-    eumetsat_key: str = Field(default=EnvVar("EUMETSAT_CONSUMER_KEY"))
-    eumetsat_secret: str = Field(default=EnvVar("EUMETSAT_CONSUMER_SECRET"))
-    aws_access_key_id: str = Field(default=EnvVar("AWS_ACCESS_KEY_ID"))
-    aws_secret_access_key: str = Field(default=EnvVar("AWS_SECRET_ACCESS_KEY"))
+    # Empty by default and read from os.environ when the container is
+    # about to run, rather than declared as EnvVar: an EnvVar default has
+    # to resolve when the code location is *defined*, so a deployment
+    # without EUMETSAT credentials would fail to load the retrieval
+    # assets too.  A missing ingest credential should break the ingest.
+    #
+    # Still not ordinary config: leaving these empty and reading the
+    # environment keeps the values out of run history and the UI, which
+    # render a resource's configured values.
+    eumetsat_key: str = Field(default="", description=_SECRET_HELP)
+    eumetsat_secret: str = Field(default="", description=_SECRET_HELP)
+    aws_access_key_id: str = Field(default="", description=_SECRET_HELP)
+    aws_secret_access_key: str = Field(default="", description=_SECRET_HELP)
     aws_region: str = Field(default="us-west-2")
 
     def store_url(self, sat: ConsumerSatellite) -> str:
@@ -204,19 +217,33 @@ class SatelliteConsumerResource(ConfigurableResource):
         return env
 
     def credential_env(self) -> dict[str, str]:
-        """The secrets the container needs, resolved from the environment.
+        """The secrets the container needs, from config or the environment.
 
         Kept apart from :meth:`window_env` so the window can be logged
         and asserted on in tests without carrying keys through it.
+
+        Raises if any is missing, naming all of them at once: finding out
+        one at a time costs a container start and an EUMETSAT round trip
+        each.
         """
-        return {
-            "EUMETSAT_CONSUMER_KEY": self.eumetsat_key,
-            "EUMETSAT_CONSUMER_SECRET": self.eumetsat_secret,
-            "AWS_ACCESS_KEY_ID": self.aws_access_key_id,
-            "AWS_SECRET_ACCESS_KEY": self.aws_secret_access_key,
-            "AWS_DEFAULT_REGION": self.aws_region,
-            "AWS_REGION": self.aws_region,
+        resolved = {
+            var: (configured or os.environ.get(var, ""))
+            for var, configured in (
+                ("EUMETSAT_CONSUMER_KEY", self.eumetsat_key),
+                ("EUMETSAT_CONSUMER_SECRET", self.eumetsat_secret),
+                ("AWS_ACCESS_KEY_ID", self.aws_access_key_id),
+                ("AWS_SECRET_ACCESS_KEY", self.aws_secret_access_key),
+            )
         }
+        missing = sorted(var for var, value in resolved.items() if not value)
+        if missing:
+            raise RuntimeError(
+                f"satellite-consumer needs {', '.join(missing)}; set them in "
+                f"the environment of whatever runs the ingest assets"
+            )
+        resolved["AWS_DEFAULT_REGION"] = self.aws_region
+        resolved["AWS_REGION"] = self.aws_region
+        return resolved
 
 
 def _stamp(t: datetime) -> str:

@@ -89,10 +89,15 @@ from dagster import (
 
 from operational import sensors as sensors_module
 from operational.assets import amv_assets as amv_assets_module
+from dagster_docker import PipesDockerClient
+
+from operational.assets.consumer_assets import build_consumer_assets
 from operational.assets.mosaic_assets import global_mosaic, published_mosaic
 from operational.config import OperationalConfig
 from operational.core.partitions import cron_for_cadence
+from operational.satellite_consumer import SatelliteConsumerResource
 from operational.jobs import (
+    build_ingest_job,
     build_backstop_schedule,
     build_full_job,
     build_satellite_jobs,
@@ -248,6 +253,17 @@ def default_resources(
             availability_tolerance_minutes=cfg.availability_tolerance_minutes,
             resolution_m=cfg.resolution_m,
         ),
+        "satellite_consumer": SatelliteConsumerResource(
+            image=_env_or(
+                "STEREO_WINDS_OP_CONSUMER_IMAGE",
+                SatelliteConsumerResource.model_fields["image"].default,
+                env,
+            ),
+        ),
+        # Launches the consumer container.  Constructed here rather than
+        # inside the asset so a code location without a Docker daemon
+        # still loads: the client only contacts one when a run starts.
+        "pipes_docker_client": PipesDockerClient(),
     }
 
 
@@ -387,6 +403,9 @@ def build_definitions(
     partitions = resolve_partitions_def(cfg, env)
 
     amv_by_sat = resolve_amv_assets(partitions, cfg)
+    # The EUMETSAT ingest assets share the retrieval's partition axis, so
+    # a cycle can be consumed and retrieved under the same partition key.
+    consumer_by_sat = build_consumer_assets(partitions)
     satellite_keys = {sat_id: list(asset_def.keys) for sat_id, asset_def in amv_by_sat.items()}
     check_satellite_agreement(cfg, satellite_keys)
     check_mosaic_inputs(key for keys in satellite_keys.values() for key in keys)
@@ -395,6 +414,7 @@ def build_definitions(
     full_job = build_full_job(max_concurrent=max_concurrent)
     jobs = [
         full_job,
+        build_ingest_job(max_concurrent=max_concurrent),
         *build_satellite_jobs(satellite_keys, max_concurrent=max_concurrent),
     ]
     schedule = build_backstop_schedule(full_job, partitions)
@@ -406,7 +426,12 @@ def build_definitions(
         getattr(partitions, "cron_schedule", partitions),
     )
     return Definitions(
-        assets=[*amv_by_sat.values(), global_mosaic, published_mosaic],
+        assets=[
+            *consumer_by_sat.values(),
+            *amv_by_sat.values(),
+            global_mosaic,
+            published_mosaic,
+        ],
         jobs=jobs,
         schedules=[schedule],
         sensors=discover_sensors(),
