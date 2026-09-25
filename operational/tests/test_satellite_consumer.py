@@ -126,3 +126,51 @@ class TestWindowFor:
     def test_zero_cycles_is_refused(self):
         with pytest.raises(ValueError, match="positive"):
             window_for(consumer_satellite("iodc"), T0, cycles=0)
+
+
+class TestCredentialResolution:
+    """A missing ingest credential must not break the whole code location."""
+
+    def test_constructs_with_nothing_set(self, monkeypatch):
+        for var in (
+            "EUMETSAT_CONSUMER_KEY",
+            "EUMETSAT_CONSUMER_SECRET",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        # Definition-time construction must not raise: an EnvVar default
+        # would have, taking the retrieval assets down with it.
+        SatelliteConsumerResource()
+
+    def test_reads_the_environment_when_unset(self, monkeypatch):
+        monkeypatch.setenv("EUMETSAT_CONSUMER_KEY", "from-env")
+        monkeypatch.setenv("EUMETSAT_CONSUMER_SECRET", "s")
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "a")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "b")
+        creds = SatelliteConsumerResource().credential_env()
+        assert creds["EUMETSAT_CONSUMER_KEY"] == "from-env"
+
+    def test_explicit_config_wins(self, monkeypatch):
+        monkeypatch.setenv("EUMETSAT_CONSUMER_KEY", "from-env")
+        monkeypatch.setenv("EUMETSAT_CONSUMER_SECRET", "s")
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "a")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "b")
+        r = SatelliteConsumerResource(eumetsat_key="explicit")
+        assert r.credential_env()["EUMETSAT_CONSUMER_KEY"] == "explicit"
+
+    def test_missing_names_all_of_them_at_once(self, monkeypatch):
+        for var in (
+            "EUMETSAT_CONSUMER_KEY",
+            "EUMETSAT_CONSUMER_SECRET",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        with pytest.raises(RuntimeError) as exc:
+            SatelliteConsumerResource().credential_env()
+        message = str(exc.value)
+        # One container start and EUMETSAT round trip per missing name is
+        # an expensive way to discover them one at a time.
+        for var in ("EUMETSAT_CONSUMER_KEY", "AWS_SECRET_ACCESS_KEY"):
+            assert var in message

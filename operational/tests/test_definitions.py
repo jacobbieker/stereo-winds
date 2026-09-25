@@ -30,6 +30,8 @@ from dagster import (
 )
 
 from operational.assets.amv_assets import amv_asset_name
+from operational.assets.consumer_assets import consumer_asset_name
+from operational.satellite_consumer import CONSUMER_SATELLITES
 from operational.config import OperationalConfig
 from operational.core.partitions import build_partitions_def
 from operational.definitions import (
@@ -73,6 +75,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SATELLITES = OperationalConfig.from_env().satellites
 
 #: Every asset key the code location is expected to expose.
+#: The retrieval graph: what the full job covers.
 EXPECTED_ASSET_KEYS = {
     # Through the module's own slugifier: mtg-i1 becomes amv_mtg_i1,
     # since dagster asset names cannot carry a hyphen.
@@ -80,6 +83,11 @@ EXPECTED_ASSET_KEYS = {
     AssetKey("global_mosaic"),
     AssetKey("published_mosaic"),
 }
+
+#: The EUMETSAT ingest, which the code location ships but the full
+#: retrieval job deliberately leaves out: it runs a container against an
+#: external service on each satellite's own cadence.
+EXPECTED_INGEST_KEYS = {AssetKey(consumer_asset_name(key)) for key in CONSUMER_SATELLITES}
 
 #: The cadence the asset modules were imported at.
 BUILT_CADENCE_MINUTES = OperationalConfig.from_env().cadence_minutes
@@ -131,7 +139,9 @@ class TestDefinitionsLoad:
         Definitions.validate_loadable(defs)
 
     def test_expected_asset_keys_are_present(self):
-        assert set(defs.resolve_asset_graph().get_all_asset_keys()) == EXPECTED_ASSET_KEYS
+        assert set(defs.resolve_asset_graph().get_all_asset_keys()) == (
+            EXPECTED_ASSET_KEYS | EXPECTED_INGEST_KEYS
+        )
 
     def test_every_asset_is_partitioned_the_same_way(self):
         partitions = {spec.partitions_def for spec in defs.resolve_all_asset_specs()}
@@ -171,7 +181,11 @@ class TestFullJob:
 
     def test_selects_the_whole_graph(self):
         job_def = defs.resolve_job_def(FULL_JOB_NAME)
+        # The ingest is not part of the retrieval: folding it in would
+        # make every backstop tick fetch from EUMETSAT, and would stop a
+        # deployment without a Docker daemon running the retrieval.
         assert _selected_keys(job_def) == EXPECTED_ASSET_KEYS
+        assert not (_selected_keys(job_def) & EXPECTED_INGEST_KEYS)
 
     def test_is_partitioned(self):
         job_def = defs.resolve_job_def(FULL_JOB_NAME)
@@ -498,7 +512,14 @@ class TestResources:
     """Lazy by contract: constructing one must not touch anything."""
 
     def test_expected_resource_keys(self):
-        assert set(defs.resources) == {"paths", "store", "model", "run_settings"}
+        assert set(defs.resources) == {
+            "paths",
+            "store",
+            "model",
+            "run_settings",
+            "satellite_consumer",
+            "pipes_docker_client",
+        }
 
     def test_defaults_construct_without_any_files(self, tmp_path):
         missing = tmp_path / "definitely" / "not" / "here"
@@ -509,7 +530,14 @@ class TestResources:
                 store_uri=str(missing / "store.icechunk"),
             )
         )
-        assert set(resources) == {"paths", "store", "model", "run_settings"}
+        assert set(resources) == {
+            "paths",
+            "store",
+            "model",
+            "run_settings",
+            "satellite_consumer",
+            "pipes_docker_client",
+        }
         # Nothing was created on the way.
         assert not missing.exists()
 
@@ -825,8 +853,16 @@ class TestMaterializeOnePartition:
             store_uri=str(tmp_path / "store.icechunk"),
             resolution_m=200_000.0,
         )
+        # The retrieval graph only.  The ingest assets run a container
+        # against EUMETSAT, which no test should reach for; the full job
+        # excludes them for the same reason.
+        retrieval = [
+            asset_def
+            for asset_def in defs.assets
+            if not (set(asset_def.keys) & EXPECTED_INGEST_KEYS)
+        ]
         result = materialize(
-            list(defs.assets),
+            retrieval,
             partition_key=A_PARTITION_KEY,
             resources=_resources_without_checkpoints(config),
         )
