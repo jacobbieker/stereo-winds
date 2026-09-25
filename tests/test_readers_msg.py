@@ -18,7 +18,6 @@ from stereo_winds.readers.msg import (
     _resolve_band,
 )
 
-
 # ── Offline unit tests (no network) ──────────────────────────────────
 
 
@@ -70,8 +69,10 @@ class TestBandMapping:
     def test_every_student_band_is_available(self):
         """The default flow/rad bands must all map, or MSG is useless here."""
         from stereo_winds.student_dataset import (
-            DEFAULT_FLOW_BANDS, DEFAULT_RAD_BANDS,
+            DEFAULT_FLOW_BANDS,
+            DEFAULT_RAD_BANDS,
         )
+
         for band in set(DEFAULT_FLOW_BANDS) | set(DEFAULT_RAD_BANDS):
             assert band in ABI_TO_SEVIRI, f"{band} has no SEVIRI equivalent"
 
@@ -86,8 +87,9 @@ class TestConstruction:
         assert MSG(bands=["C14"]).bands == ["IR_108"]
 
     def test_unknown_satellite_raises(self):
+        # Was "msg-0deg" until that became a real service.
         with pytest.raises(ValueError, match="Unknown satellite"):
-            MSG(satellite="msg-0deg")
+            MSG(satellite="msg-rss")
 
     def test_store_prefix(self):
         assert MSG()._store_prefix("3000m") == "geo/iodc_3000m_test.icechunk"
@@ -107,7 +109,8 @@ class TestCadence:
 
         base = Path(__file__).resolve().parent.parent
         spec = importlib.util.spec_from_file_location(
-            "ring_msg", base / "scripts" / "infer_student_global_ring.py")
+            "ring_msg", base / "scripts" / "infer_student_global_ring.py"
+        )
         ring = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = ring
         spec.loader.exec_module(ring)
@@ -123,8 +126,7 @@ class TestCadence:
 class TestSelectTime:
     def _store(self, times):
         return xr.Dataset(
-            {"IR_108": (("time", "y", "x"),
-                        np.zeros((len(times), 2, 2), np.float32))},
+            {"IR_108": (("time", "y", "x"), np.zeros((len(times), 2, 2), np.float32))},
             coords={"time": [np.datetime64(t, "ns") for t in times]},
         )
 
@@ -160,8 +162,12 @@ class TestBuildCoords:
     def test_descending_axes_are_normalised(self):
         x = np.linspace(5.5e6, -5.5e6, 3)
         y = np.linspace(5.5e6, -5.5e6, 3)
-        ds = xr.Dataset(coords={"x_geostationary": ("x_geostationary", x),
-                                "y_geostationary": ("y_geostationary", y)})
+        ds = xr.Dataset(
+            coords={
+                "x_geostationary": ("x_geostationary", x),
+                "y_geostationary": ("y_geostationary", y),
+            }
+        )
         rad = np.arange(9, dtype=np.float32).reshape(3, 3)
         x_m, y_m, out = MSG()._build_coords(ds, rad)
         assert x_m[0] < x_m[-1] and y_m[0] < y_m[-1]
@@ -169,39 +175,46 @@ class TestBuildCoords:
 
     def test_radian_coords_converted_to_metres(self):
         rad_coords = np.linspace(-0.15, 0.15, 3)
-        ds = xr.Dataset(coords={"x_geostationary": ("x_geostationary", rad_coords),
-                                "y_geostationary": ("y_geostationary", rad_coords)})
-        x_m, _, _ = MSG()._build_coords(
-            ds, np.zeros((3, 3), np.float32), sat_height=35785831.0)
+        ds = xr.Dataset(
+            coords={
+                "x_geostationary": ("x_geostationary", rad_coords),
+                "y_geostationary": ("y_geostationary", rad_coords),
+            }
+        )
+        x_m, _, _ = MSG()._build_coords(ds, np.zeros((3, 3), np.float32), sat_height=35785831.0)
         assert abs(x_m[-1]) > 1e6
 
 
 class TestEllipsoid:
     def test_read_from_area_definition(self):
-        area = ("{'msg_seviri_iodc_3km': {'projection': {'proj': 'geos', "
-                "'lon_0': 45.5, 'h': 35785831, 'a': 6378169, "
-                "'rf': 295.488065897014}}}")
-        a, b = scene_ellipsoid(xr.Dataset(attrs={"area": area}),
-                               fallback_semi_major=1.0, fallback_semi_minor=2.0)
+        area = (
+            "{'msg_seviri_iodc_3km': {'projection': {'proj': 'geos', "
+            "'lon_0': 45.5, 'h': 35785831, 'a': 6378169, "
+            "'rf': 295.488065897014}}}"
+        )
+        a, b = scene_ellipsoid(
+            xr.Dataset(attrs={"area": area}), fallback_semi_major=1.0, fallback_semi_minor=2.0
+        )
         assert a == pytest.approx(6378169.0)
         assert b == pytest.approx(6356583.8, abs=0.1)
 
     def test_differs_from_grs80(self):
         """The reason this is read at all: MSG is not on GRS80."""
         area = "{'a': {'projection': {'a': 6378169, 'rf': 295.488065897014}}}"
-        _, b = scene_ellipsoid(xr.Dataset(attrs={"area": area}),
-                               fallback_semi_major=1.0, fallback_semi_minor=2.0)
+        _, b = scene_ellipsoid(
+            xr.Dataset(attrs={"area": area}), fallback_semi_major=1.0, fallback_semi_minor=2.0
+        )
         assert abs(b - 6356752.31414) > 100.0
 
     def test_explicit_semi_minor_wins(self):
         area = "{'a': {'projection': {'a': 6378137, 'b': 6356752.0}}}"
-        a, b = scene_ellipsoid(xr.Dataset(attrs={"area": area}),
-                               fallback_semi_major=1.0, fallback_semi_minor=2.0)
+        a, b = scene_ellipsoid(
+            xr.Dataset(attrs={"area": area}), fallback_semi_major=1.0, fallback_semi_minor=2.0
+        )
         assert (a, b) == pytest.approx((6378137.0, 6356752.0))
 
     def test_fallback_when_absent(self):
-        a, b = scene_ellipsoid(xr.Dataset(), fallback_semi_major=1.0,
-                               fallback_semi_minor=2.0)
+        a, b = scene_ellipsoid(xr.Dataset(), fallback_semi_major=1.0, fallback_semi_minor=2.0)
         assert (a, b) == (1.0, 2.0)
 
 
@@ -212,7 +225,7 @@ class TestConfigPreset:
     def test_projection_matches_the_service(self):
         cfg = SATELLITE_CONFIGS["msg-iodc"]
         assert cfg.sub_lon_deg == pytest.approx(45.5)
-        assert cfg.sweep == "y"          # only GOES ABI sweeps x
+        assert cfg.sweep == "y"  # only GOES ABI sweeps x
         assert (cfg.n_rows, cfg.n_cols) == (3712, 3712)
 
     def test_uses_the_msg_ellipsoid(self):
@@ -246,10 +259,66 @@ class TestMSGSmoke:
         orb = ds["Rad"].attrs["orbital_parameters"]
         assert orb["projection_longitude"] == pytest.approx(45.5, abs=0.1)
         assert orb["projection_altitude"] == pytest.approx(35785831, rel=1e-4)
-        assert ds.attrs["ellipsoid"]["semi_minor_m"] == pytest.approx(
-            6356583.8, abs=1.0)
+        assert ds.attrs["ellipsoid"]["semi_minor_m"] == pytest.approx(6356583.8, abs=1.0)
 
     def test_data_has_valid_values(self):
         ds = MSG(bands=["C14"]).data_at_time(dt.datetime(2025, 7, 15, 12, 0))
         data = ds["Rad"].values[0, 0]
         assert np.isfinite(data).sum() > 0
+
+
+class TestZeroDegreeService:
+    """The 0 degree service, the same SEVIRI at a different longitude."""
+
+    def test_served_alongside_iodc(self):
+        assert set(MSG.satellites()) == {"msg-iodc", "msg-0deg"}
+
+    def test_sub_lon_is_the_prime_meridian(self):
+        assert MSG("msg-0deg").nominal_sub_lon == 0.0
+        assert MSG("msg-iodc").nominal_sub_lon == 45.5
+
+    def test_named_store_is_the_consumers_destination(self):
+        assert MSG("msg-0deg")._store_prefix("3000m") == "geo/msg_3000m.icechunk"
+
+    def test_discovery_does_not_cross_between_services(self):
+        """The failure this guards is silent: IODC imagery for a 0 degree
+        request whenever the named store lacks a band or a time."""
+        assert MSG("msg-0deg")._discovery_prefix() == "msg_"
+        assert MSG("msg-iodc")._discovery_prefix() == "iodc_"
+
+    def test_candidate_stores_stay_within_the_service(self, monkeypatch):
+        monkeypatch.setattr(
+            MSG,
+            "_bucket_stores",
+            classmethod(
+                lambda cls: [
+                    "msg_3000m.icechunk",
+                    "msg_1000m.icechunk",
+                    "iodc_3000m.icechunk",
+                    "iodc_3000m_test.icechunk",
+                ]
+            ),
+        )
+        zero = MSG("msg-0deg")._candidate_stores("IR_108")
+        assert all("iodc" not in s for s in zero), zero
+        iodc = MSG("msg-iodc")._candidate_stores("IR_108")
+        assert all("/msg_" not in s for s in iodc), iodc
+
+    def test_a_reader_missing_a_prefix_says_so(self, monkeypatch):
+        monkeypatch.setattr(MSG, "store_discovery_prefix", {"msg-iodc": "iodc_"})
+        with pytest.raises(KeyError, match="msg-0deg"):
+            MSG("msg-0deg")._discovery_prefix()
+
+    def test_shares_the_seviri_band_table(self):
+        assert MSG("msg-0deg", ["C14"]).bands == ["IR_108"]
+
+    def test_has_a_satellite_config(self):
+        from stereo_winds.config import SATELLITE_CONFIGS
+
+        cfg = SATELLITE_CONFIGS["msg-0deg"]
+        assert cfg.sub_lon_deg == 0.0
+        assert cfg.sweep == "y"
+        # Same instrument and grid as IODC; only the longitude differs.
+        iodc = SATELLITE_CONFIGS["msg-iodc"]
+        assert (cfg.n_rows, cfg.n_cols) == (iodc.n_rows, iodc.n_cols)
+        assert cfg.semi_major_m == iodc.semi_major_m
