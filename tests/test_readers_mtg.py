@@ -13,7 +13,6 @@ from stereo_winds.readers.mtg import (
     _resolve_band,
 )
 
-
 # ── Offline unit tests (no network) ──────────────────────────────────
 
 
@@ -35,20 +34,27 @@ class TestResolveBand:
             _resolve_band("X99")
 
     def test_c09_not_mapped(self):
-        """C09 (6.9 um) has no FCI equivalent."""
-        with pytest.raises(ValueError, match="Unknown band"):
+        """C09 (6.9 um) has no FCI equivalent.
+
+        It now says so, rather than "Unknown band", which read like a
+        typo for a band the ring requests on every run.
+        """
+        with pytest.raises(ValueError, match="no FCI counterpart"):
             _resolve_band("C09")
 
     def test_c14_not_mapped(self):
         """C14 (11.2 um) has no FCI equivalent."""
-        with pytest.raises(ValueError, match="Unknown band"):
+        with pytest.raises(ValueError, match="no FCI counterpart"):
             _resolve_band("C14")
 
 
 class TestBandResolution:
-    def test_vis_500m(self):
+    def test_vis_1km(self):
+        """Was 500m, which no store could satisfy: mtg_500m holds only
+        nir_22 and vis_06, so vis_04/05/08/09 reached mtg_1000m by
+        discovery fallback rather than by being asked for."""
         for b in ("vis_04", "vis_05", "vis_06", "vis_08", "vis_09"):
-            assert _BAND_RESOLUTION[b] == "500m"
+            assert _BAND_RESOLUTION[b] == "1000m"
 
     def test_nir_1km(self):
         for b in ("nir_13", "nir_16", "nir_22"):
@@ -169,6 +175,7 @@ class TestBuildCoords:
         ds = xr.Dataset(coords={"x": ("x", x), "y": ("y", y)})
         x_m, y_m, _ = m._build_coords(ds, rad)
         from stereo_winds.readers.mtg import _SAT_HEIGHT
+
         np.testing.assert_allclose(x_m[2], 0.01 * _SAT_HEIGHT["mtg-i1"])
 
 
@@ -203,3 +210,59 @@ class TestMTGSmoke:
         ds = m.data_at_time(dt.datetime(2025, 7, 15, 12, 0))
         data = ds["Rad"].values[0, 0]
         assert np.isfinite(data).sum() > 0
+
+
+class TestStoreTiers:
+    """Each band comes from the finest store holding its whole family.
+
+    The retrieval stacks bands into one (n_channels, H, W) array, so a
+    band on an 11136-square grid beside one on 5568 fails on the first
+    copy.  Selection is therefore per family, not per band.
+    """
+
+    @staticmethod
+    def _store(band):
+        from stereo_winds.readers.mtg import MTG
+
+        r = MTG("mtg-i1")
+        return r._store_prefix(r.band_resolution[MTG.resolve_band(band)])
+
+    def test_the_wind_bands_share_one_store(self):
+        """Six of the eight exist only at 2000 m, so all eight come from
+        there -- including ir_38 and ir_105, which mtg_highres_1000m also
+        carries."""
+        wind_bands = ["C07", "C08", "C10", "C11", "C12", "C13", "C15", "C16"]
+        stores = {self._store(b) for b in wind_bands}
+        assert stores == {"geo/mtg_2000m.icechunk"}
+
+    def test_the_vis_nir_bands_share_one_store(self):
+        """vis_04/05/08/09 exist nowhere finer than 1000 m, so nir_22 and
+        vis_06 come from there too rather than from mtg_500m."""
+        vis_nir = ["C01", "C02", "C03", "C04", "C05", "C06"]
+        stores = {self._store(b) for b in vis_nir}
+        assert stores == {"geo/mtg_1000m.icechunk"}
+
+    def test_goes_vis_nir_bands_all_map_through(self):
+        from stereo_winds.readers.mtg import MTG
+
+        assert MTG.resolve_band("C01") == "vis_04"
+        assert MTG.resolve_band("C02") == "vis_06"
+        assert MTG.resolve_band("C03") == "vis_08"
+        assert MTG.resolve_band("C04") == "nir_13"
+        assert MTG.resolve_band("C05") == "nir_16"
+        assert MTG.resolve_band("C06") == "nir_22"
+
+    def test_bands_fci_lacks_explain_themselves(self):
+        """C09 and C14 are default flow bands, so they are asked for on
+        every run; "Unknown band" would read like a typo."""
+        from stereo_winds.readers.mtg import MTG
+
+        for band in ("C09", "C14"):
+            with pytest.raises(ValueError, match="no FCI counterpart"):
+                MTG.resolve_band(band)
+
+    def test_a_real_typo_still_reads_as_one(self):
+        from stereo_winds.readers.mtg import MTG
+
+        with pytest.raises(ValueError, match="Unknown band"):
+            MTG.resolve_band("C99")

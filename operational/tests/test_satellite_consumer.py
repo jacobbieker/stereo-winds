@@ -46,10 +46,20 @@ class TestSatelliteRegistry:
         assert consumer_satellite("odegree-12").store.startswith("geo/mtg_")
         assert consumer_satellite("iodc").store.startswith("geo/iodc_")
 
-    def test_resolutions_are_the_native_grids(self):
-        assert consumer_satellite("odegree-12").resolution_m == 1000  # FCI
+    def test_resolutions_are_the_tier_the_wind_bands_live_in(self):
+        # Not FCI's finest: the winds use the IR/WV bands and only
+        # mtg_2000m carries all eight, so filling mtg_1000m would leave
+        # the retrieval exactly as short of MTG as before.
+        assert consumer_satellite("odegree-12").resolution_m == 2000
         assert consumer_satellite("odegree").resolution_m == 3000  # SEVIRI
         assert consumer_satellite("iodc").resolution_m == 3000
+
+    def test_mtg_targets_the_store_the_retrieval_reads(self):
+        from stereo_winds.readers.mtg import MTG
+
+        reader = MTG("mtg-i1")
+        wanted = reader._store_prefix(reader.band_resolution["ir_105"])
+        assert consumer_satellite("odegree-12").store == wanted
 
 
 class TestWindowEnv:
@@ -58,12 +68,12 @@ class TestWindowEnv:
         sat = consumer_satellite("odegree-12")
         env = resource.window_env(sat, T0, T0 + dt.timedelta(minutes=10))
         assert env["SATCONS_SATELLITE"] == "odegree-12"
-        assert env["SATCONS_RESOLUTION"] == "1000"
+        assert env["SATCONS_RESOLUTION"] == "2000"
         assert env["SATCONS_ICECHUNK"] == "True"
         assert env["SATCONS_START_TIMESTAMP"] == "2026-09-20T00:00:00Z"
         assert env["SATCONS_END_TIMESTAMP"] == "2026-09-20T00:10:00Z"
         assert env["SATCONS_ZARR_PATH"] == (
-            "s3://us-west-2.opendata.source.coop/bkr/geo/mtg_1000m.icechunk"
+            "s3://us-west-2.opendata.source.coop/bkr/geo/mtg_2000m.icechunk"
         )
 
     def test_carries_no_credentials(self, resource):

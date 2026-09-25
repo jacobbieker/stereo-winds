@@ -62,8 +62,8 @@ class TestAssetDefinition:
     def test_metadata_records_the_destination(self):
         asset_def = build_consumer_asset("odegree-12", PARTITIONS)
         meta = next(iter(asset_def.metadata_by_key.values()))
-        assert meta["store"] == "geo/mtg_1000m.icechunk"
-        assert meta["resolution_m"] == 1000
+        assert meta["store"] == "geo/mtg_2000m.icechunk"
+        assert meta["resolution_m"] == 2000
 
 
 class TestExecution:
@@ -83,7 +83,7 @@ class TestExecution:
         result, client = self._run("odegree-12", resource, "2026-09-20-00:00")
         env = client.run.call_args.kwargs["env"]
         assert env["SATCONS_SATELLITE"] == "odegree-12"
-        assert env["SATCONS_ZARR_PATH"].endswith("geo/mtg_1000m.icechunk")
+        assert env["SATCONS_ZARR_PATH"].endswith("geo/mtg_2000m.icechunk")
         # Credentials are merged in only at the container boundary.
         assert env["EUMETSAT_CONSUMER_KEY"] == "eum-key"
         assert env["AWS_SECRET_ACCESS_KEY"] == "aws-secret"
