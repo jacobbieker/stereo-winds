@@ -73,14 +73,16 @@ class ConsumerSatellite:
 #: readers in ``stereo_winds.readers`` discover -- ``mtg_`` for MTG and
 #: ``iodc_`` for IODC -- so a consumer run tops up the same store a
 #: retrieval later reads, rather than creating a parallel one.  The
-#: resolutions are each instrument's native grid: FCI at 1 km, SEVIRI at
-#: 3 km.
+#: resolutions are the tier each instrument's retrieval bands live in,
+#: which is not the instrument's finest: FCI's IR and WV are the bands
+#: the winds use and only mtg_2000m carries all eight, so filling
+#: mtg_1000m would leave the retrieval exactly as short as before.
 CONSUMER_SATELLITES: dict[str, ConsumerSatellite] = {
     "odegree-12": ConsumerSatellite(
         key="odegree-12",
         ring_id="mtg-i1",
-        store="geo/mtg_1000m.icechunk",
-        resolution_m=1000,
+        store="geo/mtg_2000m.icechunk",
+        resolution_m=2000,
         cadence_mins=10,
         description="MTG-I1 FCI at 0 degrees",
     ),
