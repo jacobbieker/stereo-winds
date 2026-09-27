@@ -80,6 +80,9 @@ operational = [
     # Dagster orchestrates the operational AMV pipeline (operational/).
     "dagster>=1.13",
     "dagster-webserver>=1.13",
+    # PipesDockerClient, for the satellite-consumer container that pulls
+    # the EUMETSAT satellites (operational/satellite_consumer.py).
+    "dagster-docker>=0.29",
 ]
 
 [tool.pytest.ini_options]

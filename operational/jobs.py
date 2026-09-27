@@ -83,6 +83,9 @@ __all__ = [
     "DEFAULT_MAX_CONCURRENT",
     "DEFAULT_RETRY_POLICY",
     "FULL_JOB_NAME",
+    "INGEST_JOB_NAME",
+    "INGEST_GROUP",
+    "build_ingest_job",
     "MAX_CONCURRENT_ENV_VAR",
     "RUN_TAGS",
     "build_backstop_schedule",
@@ -99,6 +102,11 @@ __all__ = [
 #: Other units target the pipeline by this name rather than by importing
 #: the job object, so keep it stable.
 FULL_JOB_NAME = "operational_ring_job"
+INGEST_JOB_NAME = "operational_ingest_job"
+
+#: Asset group holding the EUMETSAT ingest.  Named here rather than
+#: imported so this module stays independent of the asset modules.
+INGEST_GROUP = "satellite_ingest"
 
 #: Name of the belt-and-braces schedule built by
 #: :func:`build_backstop_schedule`.
@@ -216,6 +224,28 @@ def _job_kwargs(
     }
 
 
+def build_ingest_job(
+    *,
+    name: str = INGEST_JOB_NAME,
+    selection: Any = None,
+    max_concurrent: int | None = None,
+    retry_policy: RetryPolicy | None = None,
+    tags: Mapping[str, str] | None = None,
+) -> UnresolvedAssetJobDefinition:
+    """Build the job that fetches the EUMETSAT satellites for a partition."""
+    return _define_asset_job(
+        name=name,
+        selection=(AssetSelection.groups(INGEST_GROUP) if selection is None else selection),
+        description=(
+            "Fetch the EUMETSAT satellites (MTG, MSG, IODC) into icechunk "
+            "for one timestamp, by running the satellite-consumer container."
+        ),
+        max_concurrent=max_concurrent,
+        retry_policy=retry_policy,
+        tags=tags,
+    )
+
+
 def build_full_job(
     *,
     name: str = FULL_JOB_NAME,
@@ -224,13 +254,22 @@ def build_full_job(
     retry_policy: RetryPolicy | None = None,
     tags: Mapping[str, str] | None = None,
 ) -> UnresolvedAssetJobDefinition:
-    """Build the job covering the whole pipeline for one partition."""
+    """Build the job covering the whole retrieval for one partition.
+
+    The EUMETSAT ingest is deliberately outside it.  Ingest runs a
+    container against an external service on each satellite's own
+    cadence, and folding it in would make every backstop tick fetch from
+    EUMETSAT, and would stop a deployment without a Docker daemon from
+    running the retrieval at all.  :func:`build_ingest_job` covers it.
+    """
+    default = AssetSelection.all() - AssetSelection.groups(INGEST_GROUP)
     return _define_asset_job(
         name=name,
-        selection=AssetSelection.all() if selection is None else selection,
+        selection=default if selection is None else selection,
         description=(
             "Full operational AMV pipeline for one timestamp: per-satellite "
-            "retrievals, global mosaic, icechunk publish."
+            "retrievals, global mosaic, icechunk publish.  Excludes the "
+            "EUMETSAT ingest, which runs on its own cadence."
         ),
         max_concurrent=max_concurrent,
         retry_policy=retry_policy,
