@@ -69,6 +69,7 @@ def clear_store_cache() -> None:
         _STORE_CONTENTS.clear()
         _BUCKET_LISTINGS.clear()
 
+
 # GRS80, the default when a store states no ellipsoid of its own.
 _GRS80_SEMI_MAJOR = 6378137.0
 _GRS80_SEMI_MINOR = 6356752.31414
@@ -79,7 +80,7 @@ class GeoStoreReader:
 
     # ── instrument description (overridden by subclasses) ──────────────
     instrument: str = "geostationary imager"
-    sweep: str = "y"          # only GOES ABI sweeps x
+    sweep: str = "y"  # only GOES ABI sweeps x
     bucket: str = "bkr"
     endpoint: str = "https://data.source.coop"
 
@@ -101,7 +102,13 @@ class GeoStoreReader:
     # Stores whose names start with this belong to this instrument, and
     # are considered when the named one lacks the band or the coverage.
     # Empty disables discovery and keeps the named store only.
-    store_discovery_prefix: str = ""
+    #
+    # A dict keyed by satellite where one reader serves several: the same
+    # instrument at two longitudes does not share stores, and a single
+    # prefix would let a request for one satellite fall through to the
+    # other's data whenever the named store was short of a band or a
+    # time.  A reader serving one satellite can still use a plain string.
+    store_discovery_prefix: str | dict[str, str] = ""
 
     scan_interval_minutes: int = 10
 
@@ -133,8 +140,7 @@ class GeoStoreReader:
         self.satellite = satellite if satellite is not None else self.satellites()[0]
         if self.satellite not in self.satellites():
             raise ValueError(
-                f"Unknown satellite {self.satellite!r}. "
-                f"Supported: {sorted(self.satellites())}"
+                f"Unknown satellite {self.satellite!r}. " f"Supported: {sorted(self.satellites())}"
             )
         raw_bands = list(bands) if bands else [self.default_band]
         self.bands = [self.resolve_band(b) for b in raw_bands]
@@ -143,8 +149,7 @@ class GeoStoreReader:
         self.cache_dir = Path(cache_dir) if cache_dir else default_cache_dir()
         # Downloads older than this (relative to the scene being read) are
         # dropped; None keeps everything.
-        self.cache_retention = (default_retention() if cache_retention == -1
-                                else cache_retention)
+        self.cache_retention = default_retention() if cache_retention == -1 else cache_retention
         self._fs = None
 
     @classmethod
@@ -211,8 +216,7 @@ class GeoStoreReader:
         if self.store_prefixes is not None:
             return self.store_prefixes[self.satellite]
         if self.store_template is None:
-            raise NotImplementedError(
-                f"{type(self).__name__} declares no store location")
+            raise NotImplementedError(f"{type(self).__name__} declares no store location")
         return self.store_template.format(resolution=resolution)
 
     # ------------------------------------------------------------------
@@ -231,16 +235,36 @@ class GeoStoreReader:
             import s3fs
 
             fs = s3fs.S3FileSystem(anon=True, endpoint_url=cls.endpoint)
-            names = sorted(k.split("/")[-1]
-                           for k in fs.ls(f"{cls.bucket}/{cls.store_root}"))
+            names = sorted(k.split("/")[-1] for k in fs.ls(f"{cls.bucket}/{cls.store_root}"))
         except Exception:
-            logger.exception("Could not list %s/%s; falling back to the "
-                             "store names built from the band table",
-                             cls.bucket, cls.store_root)
+            logger.exception(
+                "Could not list %s/%s; falling back to the "
+                "store names built from the band table",
+                cls.bucket,
+                cls.store_root,
+            )
             names = []
         with _OPEN_LOCK:
             _BUCKET_LISTINGS[key] = names
         return names
+
+    def _discovery_prefix(self) -> str:
+        """This satellite's store-name prefix, or "" when discovery is off.
+
+        A dict must name every satellite the reader serves: falling back
+        to some other satellite's prefix is how a 0 degree request ends
+        up reading a store 45 degrees away.
+        """
+        prefix = self.store_discovery_prefix
+        if not isinstance(prefix, dict):
+            return prefix
+        try:
+            return prefix[self.satellite]
+        except KeyError:
+            raise KeyError(
+                f"{type(self).__name__} has no store discovery prefix for "
+                f"{self.satellite!r}; known: {', '.join(sorted(prefix))}"
+            ) from None
 
     def _candidate_stores(self, band: str) -> list[str]:
         """Stores that might hold ``band``, most likely first.
@@ -251,13 +275,16 @@ class GeoStoreReader:
         stores after it.
         """
         preferred = self._store_prefix(self.band_resolution[band])
-        if not self.store_discovery_prefix:
+        discovery = self._discovery_prefix()
+        if not discovery:
             return [preferred]
 
         tier = self.band_resolution[band]
-        others = [f"{self.store_root}/{name}"
-                  for name in self._bucket_stores()
-                  if name.startswith(self.store_discovery_prefix)]
+        others = [
+            f"{self.store_root}/{name}"
+            for name in self._bucket_stores()
+            if name.startswith(discovery)
+        ]
         # Same tier first (a newer ingest of the same grid), then the rest.
         same_tier = [p for p in others if tier in p and p != preferred]
         rest = [p for p in others if tier not in p and p != preferred]
@@ -287,8 +314,7 @@ class GeoStoreReader:
         caller fall back to public S3 where one exists.
         """
         target = np.datetime64(t.replace(tzinfo=None), "ns")
-        tolerance = np.timedelta64(
-            int(self.store_tolerance.total_seconds()), "s")
+        tolerance = np.timedelta64(int(self.store_tolerance.total_seconds()), "s")
         tried: list[str] = []
         for prefix in self._candidate_stores(band):
             contents = self._store_contents(prefix)
@@ -342,7 +368,9 @@ class GeoStoreReader:
             return ds
 
     def _select_time(
-        self, ds: xr.Dataset, t: dt.datetime,
+        self,
+        ds: xr.Dataset,
+        t: dt.datetime,
         tolerance: dt.timedelta | None = -1,  # sentinel: use store_tolerance
     ) -> xr.Dataset:
         """Select the nearest time step, within ``tolerance`` if given.
@@ -361,9 +389,7 @@ class GeoStoreReader:
         try:
             return ds.sel(time=target, method="nearest", tolerance=tol)
         except KeyError as exc:
-            raise SceneNotInStore(
-                f"no {self.satellite} scan within {tolerance} of {t}"
-            ) from exc
+            raise SceneNotInStore(f"no {self.satellite} scan within {tolerance} of {t}") from exc
 
     # ------------------------------------------------------------------
     # Public API
@@ -392,14 +418,16 @@ class GeoStoreReader:
         except SceneNotInStore as exc:
             if not self.allow_s3_fallback:
                 raise
-            logger.info("%s — falling back to %s on public S3",
-                        exc, self.s3_bucket_label())
+            logger.info("%s — falling back to %s on public S3", exc, self.s3_bucket_label())
         except Exception:
             if not self.allow_s3_fallback:
                 raise
             logger.exception(
-                "icechunk read failed for %s %s at %s — falling back to "
-                "public S3", self.satellite, band, t)
+                "icechunk read failed for %s %s at %s — falling back to " "public S3",
+                self.satellite,
+                band,
+                t,
+            )
         out = self._s3_data_at_time(t, band)
         self.prune_download_cache(t)
         return out
@@ -421,13 +449,16 @@ class GeoStoreReader:
         # constant: geostationary satellites drift within their
         # station-keeping box and are periodically relocated.
         orbital = scene_orbital_parameters(
-            snap, band,
+            snap,
+            band,
             fallback_sub_lon=self.nominal_sub_lon,
             fallback_height=self.nominal_height,
             label=f"{self.satellite} {band}",
         )
         x_m, y_m_asc, rad_sn = self._build_coords(
-            ds, rad_2d, sat_height=orbital["projection_altitude"],
+            ds,
+            rad_2d,
+            sat_height=orbital["projection_altitude"],
         )
 
         Rad = xr.DataArray(
@@ -440,8 +471,7 @@ class GeoStoreReader:
 
         sel_time = snap["time"].values if "time" in snap.coords else None
         if sel_time is not None:
-            actual = str(np.datetime_as_string(
-                np.datetime64(sel_time, "ns"), unit="s"))
+            actual = str(np.datetime_as_string(np.datetime64(sel_time, "ns"), unit="s"))
             Rad.attrs["time_coverage_start"] = actual
             Rad.attrs["time_coverage_end"] = actual
 
@@ -449,12 +479,14 @@ class GeoStoreReader:
         out.attrs["sweep_angle_axis"] = self.sweep
         out.attrs["source"] = "icechunk"
         semi_major, semi_minor = scene_ellipsoid(
-            snap, band,
+            snap,
+            band,
             fallback_semi_major=self.semi_major,
             fallback_semi_minor=self.semi_minor,
         )
         out.attrs["ellipsoid"] = {
-            "semi_major_m": semi_major, "semi_minor_m": semi_minor,
+            "semi_major_m": semi_major,
+            "semi_minor_m": semi_minor,
         }
         return out
 
@@ -516,7 +548,9 @@ class GeoStoreReader:
     # ------------------------------------------------------------------
 
     def _build_coords(
-        self, ds: xr.Dataset, rad_2d: np.ndarray,
+        self,
+        ds: xr.Dataset,
+        rad_2d: np.ndarray,
         sat_height: float | None = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Build x/y metre coordinates, oriented west->east and south->north.
@@ -554,7 +588,10 @@ class GeoStoreReader:
         return x_m.astype(np.float64), y_m.astype(np.float64), rad_2d
 
     def _get_coord(
-        self, ds: xr.Dataset, axis: str, expected_len: int,
+        self,
+        ds: xr.Dataset,
+        axis: str,
+        expected_len: int,
     ) -> np.ndarray:
         """Retrieve the x or y coordinate array, synthesising if absent."""
         for name in self.coord_names.get(axis, []):
@@ -565,8 +602,10 @@ class GeoStoreReader:
 
         scale = self.synth_scales.get(expected_len, self.default_synth_scale)
         logger.warning(
-            "No %s coordinate found in store; synthesising with "
-            "scale=%.2e rad/px (grid %d)", axis, scale, expected_len,
+            "No %s coordinate found in store; synthesising with " "scale=%.2e rad/px (grid %d)",
+            axis,
+            scale,
+            expected_len,
         )
         half = expected_len / 2.0
         if axis == "x":
@@ -591,13 +630,10 @@ class GeoStoreReader:
     def _snap_slot(self, t: dt.datetime) -> dt.datetime:
         """Floor to the full-disk slot containing ``t``."""
         step = self.scan_interval_minutes
-        return t.replace(minute=(t.minute // step) * step,
-                         second=0, microsecond=0, tzinfo=None)
+        return t.replace(minute=(t.minute // step) * step, second=0, microsecond=0, tzinfo=None)
 
     def _s3_data_at_time(self, t: dt.datetime, band: str) -> xr.Dataset:
-        raise NotImplementedError(
-            f"{type(self).__name__} has no public-S3 fallback")
+        raise NotImplementedError(f"{type(self).__name__} has no public-S3 fallback")
 
     def __repr__(self) -> str:
-        return (f"{type(self).__name__}(satellite={self.satellite!r}, "
-                f"bands={self.bands!r})")
+        return f"{type(self).__name__}(satellite={self.satellite!r}, " f"bands={self.bands!r})"

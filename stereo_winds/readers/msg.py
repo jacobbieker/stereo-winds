@@ -11,6 +11,8 @@ Icechunk stores
 ---------------
 - ``geo/iodc_3000m_test.icechunk`` — Indian Ocean Data Coverage service
   (Meteosat at 45.5°E), eleven narrow channels on the 3 km 3712² grid
+- ``geo/msg_3000m.icechunk`` — the 0 degree (prime) service, the same
+  eleven channels on the same grid, written by the satellite consumer
 
 Differences from the other geostationary imagers
 ------------------------------------------------
@@ -29,6 +31,7 @@ ellipsoid is read from the store and passed on with the scene.
 
 Requires ``icechunk`` and ``zarr>=3``.
 """
+
 from __future__ import annotations
 
 import logging
@@ -41,7 +44,8 @@ logger = logging.getLogger(__name__)
 # authority and these are only used when it carries no metadata).
 _SAT_HEIGHT = 35785831.0  # m (perspective point height above the ellipsoid)
 _SUB_LON: dict[str, float] = {
-    "msg-iodc": 45.5,     # Indian Ocean Data Coverage service
+    "msg-iodc": 45.5,  # Indian Ocean Data Coverage service
+    "msg-0deg": 0.0,  # the 0 degree (prime) service
 }
 
 # MSG reference ellipsoid, used when the store does not state one.
@@ -55,10 +59,17 @@ SCAN_INTERVAL_MINUTES = 15
 # Narrow SEVIRI channels and their store resolution tier.  HRV is not
 # carried by these stores.
 _BAND_RESOLUTION: dict[str, str] = {
-    "VIS006": "3000m", "VIS008": "3000m", "IR_016": "3000m",
-    "IR_039": "3000m", "WV_062": "3000m", "WV_073": "3000m",
-    "IR_087": "3000m", "IR_097": "3000m", "IR_108": "3000m",
-    "IR_120": "3000m", "IR_134": "3000m",
+    "VIS006": "3000m",
+    "VIS008": "3000m",
+    "IR_016": "3000m",
+    "IR_039": "3000m",
+    "WV_062": "3000m",
+    "WV_073": "3000m",
+    "IR_087": "3000m",
+    "IR_097": "3000m",
+    "IR_108": "3000m",
+    "IR_120": "3000m",
+    "IR_134": "3000m",
 }
 
 # ABI band -> SEVIRI equivalent, by nearest band centre:
@@ -84,11 +95,20 @@ _BAND_RESOLUTION: dict[str, str] = {
 # C09/C10 and C13/C14 therefore resolve to the same SEVIRI channel: with
 # eleven channels against sixteen, some ABI pairs cannot be separated.
 ABI_TO_SEVIRI: dict[str, str] = {
-    "C01": "VIS006", "C02": "VIS006", "C03": "VIS008",
-    "C05": "IR_016", "C07": "IR_039", "C08": "WV_062",
-    "C09": "WV_073", "C10": "WV_073", "C11": "IR_087",
-    "C12": "IR_097", "C13": "IR_108", "C14": "IR_108",
-    "C15": "IR_120", "C16": "IR_134",
+    "C01": "VIS006",
+    "C02": "VIS006",
+    "C03": "VIS008",
+    "C05": "IR_016",
+    "C07": "IR_039",
+    "C08": "WV_062",
+    "C09": "WV_073",
+    "C10": "WV_073",
+    "C11": "IR_087",
+    "C12": "IR_097",
+    "C13": "IR_108",
+    "C14": "IR_108",
+    "C15": "IR_120",
+    "C16": "IR_134",
 }
 
 # ABI bands with no SEVIRI counterpart, listed so callers can explain
@@ -100,6 +120,16 @@ _ENDPOINT = "https://data.source.coop"
 
 _STORE_PREFIX: dict[str, str] = {
     "msg-iodc": "geo/iodc_3000m_test.icechunk",
+    "msg-0deg": "geo/msg_3000m.icechunk",
+}
+
+# Per satellite, because the two services do not share stores: one
+# prefix would let a 0 degree request fall through to an IODC store
+# whenever the named one was short of a band or a time, and hand back
+# imagery from a satellite 45.5 degrees away without saying so.
+_STORE_DISCOVERY: dict[str, str] = {
+    "msg-iodc": "iodc_",
+    "msg-0deg": "msg_",
 }
 
 
@@ -113,7 +143,7 @@ class MSG(GeoStoreReader):
 
     Parameters
     ----------
-    satellite : "msg-iodc"
+    satellite : "msg-iodc" (45.5°E) or "msg-0deg" (0°)
     bands : list with a single band, SEVIRI (``["IR_108"]``) or ABI
         (``["C14"]``) named
     """
@@ -131,17 +161,13 @@ class MSG(GeoStoreReader):
     band_resolution = _BAND_RESOLUTION
     abi_to_native = ABI_TO_SEVIRI
     abi_without_native = ABI_WITHOUT_SEVIRI
-    missing_band_reason = (
-        "SEVIRI carries no 1.4 µm cirrus or 2.2 µm channel"
-    )
-    band_name_hint = (
-        "Use SEVIRI names (VIS006-IR_134) or ABI names (C01-C16)."
-    )
+    missing_band_reason = "SEVIRI carries no 1.4 µm cirrus or 2.2 µm channel"
+    band_name_hint = "Use SEVIRI names (VIS006-IR_134) or ABI names (C01-C16)."
     default_band = "IR_108"
 
     store_prefixes = _STORE_PREFIX
-    # Also consider the archive and high-resolution IODC stores.
-    store_discovery_prefix = "iodc_"
+    # Also consider the instrument's other stores for this service.
+    store_discovery_prefix = _STORE_DISCOVERY
     scan_interval_minutes = SCAN_INTERVAL_MINUTES
 
     coord_names = {

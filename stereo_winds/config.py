@@ -138,6 +138,24 @@ MSG_IODC_CONFIG = SatelliteConfig(
     n_cols=3712,
 )
 
+# The same SEVIRI instrument as MSG_IODC_CONFIG, on the 0 degree
+# (prime) service rather than Indian Ocean coverage.  Identical grid and
+# ellipsoid; only the sub-satellite longitude differs.
+MSG_0DEG_CONFIG = SatelliteConfig(
+    satellite_id="msg-0deg",
+    sub_lon_deg=0.0,
+    satellite_height_m=35785831.0,
+    semi_major_m=6378169.0,
+    semi_minor_m=6356583.8,
+    sweep="y",
+    scale_x=8.384332e-05,
+    scale_y=-8.384332e-05,
+    x_offset=-0.155613265,
+    y_offset=0.155613265,
+    n_rows=3712,
+    n_cols=3712,
+)
+
 SATELLITE_CONFIGS = {
     "goes16": GOES16_CONFIG,
     "goes18": GOES18_CONFIG,
@@ -147,6 +165,7 @@ SATELLITE_CONFIGS = {
     "gk2a": GK2A_CONFIG,
     "mtg-i1": MTG_I1_CONFIG,
     "msg-iodc": MSG_IODC_CONFIG,
+    "msg-0deg": MSG_0DEG_CONFIG,
 }
 
 
@@ -186,7 +205,10 @@ def sector_config(
         logger.warning(
             "Sector grid for %s is %.3f px off the canonical lattice "
             "(col_off=%.3f, row_off=%.3f); snapping anyway",
-            runtime.satellite_id, residual, col_off, row_off,
+            runtime.satellite_id,
+            residual,
+            col_off,
+            row_off,
         )
     return replace(
         canonical,
@@ -195,6 +217,7 @@ def sector_config(
         n_rows=runtime.n_rows,
         n_cols=runtime.n_cols,
     )
+
 
 # ---------------------------------------------------------------------------
 # Cross-instrument band equivalence (closest spectral centers)
@@ -205,40 +228,40 @@ def sector_config(
 # and the FCI side loads its closest equivalent. ABI C09 (6.9 um) and
 # C14 (11.2 um) have no FCI twin and are absent.
 ABI_TO_FCI_BAND = {
-    "C01": "vis_04",   # 0.47 / 0.444 um
-    "C02": "vis_06",   # 0.64 / 0.64  um
-    "C03": "vis_08",   # 0.865 / 0.865 um
-    "C04": "nir_13",   # 1.378 / 1.38 um
-    "C05": "nir_16",   # 1.61 / 1.61  um
-    "C06": "nir_22",   # 2.25 / 2.25  um
-    "C07": "ir_38",    # 3.90 / 3.80  um
-    "C08": "wv_63",    # 6.19 / 6.30  um
-    "C10": "wv_73",    # 7.34 / 7.35  um
-    "C11": "ir_87",    # 8.44 / 8.70  um
-    "C12": "ir_97",    # 9.61 / 9.66  um
-    "C13": "ir_105",   # 10.35 / 10.50 um
-    "C15": "ir_123",   # 12.30 / 12.30 um
-    "C16": "ir_133",   # 13.30 / 13.30 um
+    "C01": "vis_04",  # 0.47 / 0.444 um
+    "C02": "vis_06",  # 0.64 / 0.64  um
+    "C03": "vis_08",  # 0.865 / 0.865 um
+    "C04": "nir_13",  # 1.378 / 1.38 um
+    "C05": "nir_16",  # 1.61 / 1.61  um
+    "C06": "nir_22",  # 2.25 / 2.25  um
+    "C07": "ir_38",  # 3.90 / 3.80  um
+    "C08": "wv_63",  # 6.19 / 6.30  um
+    "C10": "wv_73",  # 7.34 / 7.35  um
+    "C11": "ir_87",  # 8.44 / 8.70  um
+    "C12": "ir_97",  # 9.61 / 9.66  um
+    "C13": "ir_105",  # 10.35 / 10.50 um
+    "C15": "ir_123",  # 12.30 / 12.30 um
+    "C16": "ir_133",  # 13.30 / 13.30 um
 }
 
 # ABI band -> AMI (GK-2A) channel. AMI has 16 channels with similar
 # spectral coverage to AHI. C06 (2.25 um) has no AMI equivalent.
 ABI_TO_AMI_BAND = {
-    "C01": "VI004",   # 0.47  / 0.47  um
-    "C02": "VI006",   # 0.64  / 0.64  um
-    "C03": "VI008",   # 0.865 / 0.86  um
-    "C04": "NR013",   # 1.378 / 1.37  um
-    "C05": "NR016",   # 1.61  / 1.6   um
-    "C07": "SW038",   # 3.90  / 3.8   um
-    "C08": "WV063",   # 6.19  / 6.3   um
-    "C09": "WV069",   # 6.95  / 6.9   um
-    "C10": "WV073",   # 7.34  / 7.3   um
-    "C11": "IR087",   # 8.44  / 8.7   um
-    "C12": "IR096",   # 9.61  / 9.6   um
-    "C13": "IR105",   # 10.35 / 10.5  um
-    "C14": "IR112",   # 11.20 / 11.2  um
-    "C15": "IR123",   # 12.30 / 12.3  um
-    "C16": "IR133",   # 13.30 / 13.3  um
+    "C01": "VI004",  # 0.47  / 0.47  um
+    "C02": "VI006",  # 0.64  / 0.64  um
+    "C03": "VI008",  # 0.865 / 0.86  um
+    "C04": "NR013",  # 1.378 / 1.37  um
+    "C05": "NR016",  # 1.61  / 1.6   um
+    "C07": "SW038",  # 3.90  / 3.8   um
+    "C08": "WV063",  # 6.19  / 6.3   um
+    "C09": "WV069",  # 6.95  / 6.9   um
+    "C10": "WV073",  # 7.34  / 7.3   um
+    "C11": "IR087",  # 8.44  / 8.7   um
+    "C12": "IR096",  # 9.61  / 9.6   um
+    "C13": "IR105",  # 10.35 / 10.5  um
+    "C14": "IR112",  # 11.20 / 11.2  um
+    "C15": "IR123",  # 12.30 / 12.3  um
+    "C16": "IR133",  # 13.30 / 13.3  um
 }
 
 
@@ -304,7 +327,9 @@ class StereoPairConfig:
 
         # Auto-find RAFT checkpoint if not provided
         if "model_ckpt_path" not in kwargs or not kwargs["model_ckpt_path"]:
-            zeus_weights = Path(__file__).resolve().parent.parent / "zeus" / "zeus" / "networks" / "weights"
+            zeus_weights = (
+                Path(__file__).resolve().parent.parent / "zeus" / "zeus" / "networks" / "weights"
+            )
             ckpts = sorted(_glob.glob(str(zeus_weights / "raft-128.*.ckpt")))
             if ckpts:
                 kwargs["model_ckpt_path"] = ckpts[-1]  # latest
