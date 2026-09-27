@@ -16,11 +16,17 @@ Icechunk stores
 
 Requires ``icechunk`` and ``zarr>=3``.
 """
+
 from __future__ import annotations
 
 import logging
 
 from stereo_winds.config import ABI_TO_FCI_BAND
+
+# ABI bands with no FCI counterpart at all, as opposed to names that are
+# simply wrong.  C09 is 6.9 um and C14 is 11.2 um; FCI splits the water
+# vapour and window regions differently and has neither.
+ABI_WITHOUT_FCI = ("C09", "C14")
 from stereo_winds.readers._geos_store import GeoStoreReader
 
 logger = logging.getLogger(__name__)
@@ -34,18 +40,37 @@ _SUB_LON: dict[str, float] = {
 }
 
 # FCI channel -> resolution tier for selecting the correct icechunk store.
+# Band -> the store tier to read it from.
+#
+# Not each band's finest store, but the finest store that carries every
+# band of its family, because the retrieval stacks bands into one
+# (n_channels, H, W) array and mixing grids fails on the first copy.
+# What the four stores actually hold:
+#
+#   mtg_500m           nir_22, vis_06
+#   mtg_1000m          nir_13/16/22, vis_04/05/06/08/09
+#   mtg_highres_1000m  ir_38, ir_105
+#   mtg_2000m          ir_38, ir_105, ir_87, ir_97, ir_123, ir_133,
+#                      wv_63, wv_73
+#
+# So the VIS/NIR family resolves to 1000m: vis_04/05/08/09 exist nowhere
+# finer, and taking nir_22 or vis_06 from the 500m store would put them
+# on a 22272-square grid beside 11136-square siblings.  The IR/WV family
+# resolves to 2000m for the same reason: six of the eight exist only
+# there, and ir_38/ir_105 from mtg_highres_1000m would be 11136 square
+# against the others' 5568.  FCI's IR is natively 2 km in any case, so
+# the highres copies are resampled rather than sharper.
 _BAND_RESOLUTION: dict[str, str] = {
-    # 500 m VIS
-    "vis_04": "500m",
-    "vis_05": "500m",
-    "vis_06": "500m",
-    "vis_08": "500m",
-    "vis_09": "500m",
-    # 1 km VIS/NIR
+    # VIS/NIR: finest store holding the whole family.
+    "vis_04": "1000m",
+    "vis_05": "1000m",
+    "vis_06": "1000m",
+    "vis_08": "1000m",
+    "vis_09": "1000m",
     "nir_13": "1000m",
     "nir_16": "1000m",
     "nir_22": "1000m",
-    # 2 km IR/WV
+    # IR/WV: only mtg_2000m carries all eight.
     "ir_38": "2000m",
     "wv_63": "2000m",
     "wv_73": "2000m",
@@ -59,7 +84,7 @@ _BAND_RESOLUTION: dict[str, str] = {
 _BUCKET = "bkr"
 _ENDPOINT = "https://data.source.coop"
 
-_FULL_DISK_MINUTES = 10          # FCI full-disk repeat cycle
+_FULL_DISK_MINUTES = 10  # FCI full-disk repeat cycle
 
 
 def _resolve_band(band: str) -> str:
@@ -93,6 +118,15 @@ class MTG(GeoStoreReader):
 
     band_resolution = _BAND_RESOLUTION
     abi_to_native = ABI_TO_FCI_BAND
+    # Declared so these report themselves rather than arriving as
+    # "Unknown band": FCI has no 6.9 um or 11.2 um channel, and both are
+    # default flow bands, so the ring asks for them on every run and
+    # zero-fills what it cannot get.
+    abi_without_native = ABI_WITHOUT_FCI
+    missing_band_reason = (
+        "FCI carries no 6.9 um or 11.2 um channel; wv_73 (7.35 um) and "
+        "ir_105 (10.5 um) are the nearest, and are already C10 and C13"
+    )
     band_name_hint = (
         "Use FCI names (e.g. ir_105) or ABI names (e.g. C13). "
         "Not every ABI band has an FCI equivalent."
@@ -111,7 +145,7 @@ class MTG(GeoStoreReader):
     }
     # FCI FDHSI: 5568 x 5568 at 2 km, scale 5.58871e-05 rad/px
     synth_scales = {
-        5568: 5.58871e-05,   # 2 km
+        5568: 5.58871e-05,  # 2 km
         11136: 2.79436e-05,  # 1 km
         22272: 1.39718e-05,  # 500 m
     }
