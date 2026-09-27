@@ -10,6 +10,10 @@
 !operational/
 !scripts/infer_student_global_ring.py
 !docker/entrypoint.sh
+# Build context for docker/satellite-consumer.Dockerfile; its source
+# comes from a pinned upstream checkout, so only these two are needed.
+!docker/satellite-consumer.pixi.lock
+!docker/satellite-consumer-selfcheck.py
 !checkpoints/student.abi.mb-v3.ep21.ckpt
 !checkpoints/windflow.raft.sonde-tuned.ckpt
 
