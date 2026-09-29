@@ -396,6 +396,48 @@ class TestScratchFolder:
         assert _store_ds(repo).sizes["time"] == 1
 
 
+class TestReplaceExisting:
+    """Re-running a range that was committed while a satellite was down.
+
+    Skipping keeps the degraded mosaic and appending duplicates the
+    timestamp, so neither of the existing modes can correct one.
+    """
+
+    def test_existing_timestamp_is_overwritten_in_place(self, tmp_path, repo, stub_infer):
+        seen: set[datetime] = set()
+        _run(T0, tmp_path / "a", repo=repo, icechunk_times=seen)
+        assert _store_ds(repo).sizes["time"] == 1
+
+        _run(
+            T0,
+            tmp_path / "b",
+            repo=repo,
+            icechunk_times=seen,
+            replace_existing=True,
+        )
+        # Overwritten, not appended beside itself.
+        assert _store_ds(repo).sizes["time"] == 1
+
+    def test_it_recomputes_rather_than_skipping(self, tmp_path, repo, stub_infer):
+        seen: set[datetime] = set()
+        _run(T0, tmp_path / "a", repo=repo, icechunk_times=seen)
+        n_before = len(stub_infer)
+        _run(
+            T0,
+            tmp_path / "b",
+            repo=repo,
+            icechunk_times=seen,
+            replace_existing=True,
+        )
+        assert len(stub_infer) > n_before
+
+    def test_without_it_an_existing_timestamp_is_left_alone(self, tmp_path, repo, stub_infer):
+        seen: set[datetime] = set()
+        _run(T0, tmp_path / "a", repo=repo, icechunk_times=seen)
+        _run(T0, tmp_path / "b", repo=repo, icechunk_times=seen)
+        assert _store_ds(repo).sizes["time"] == 1
+
+
 class TestIcechunkStorage:
     def test_s3_uri_parsed(self):
         pytest.importorskip("icechunk")

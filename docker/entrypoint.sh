@@ -31,6 +31,7 @@
 #   AMV_SKIP_GLOBAL                 --skip-global
 #   AMV_REQUIRE_ALL_SATELLITES      --require-all-satellites
 #   AMV_SKIP_EXISTING               --skip-existing
+#   AMV_REPLACE_EXISTING            --replace-existing
 #   AMV_NO_NETCDF                   --no-netcdf
 #   AMV_KEEP_NETCDF                 --keep-netcdf
 #   AMV_KEEP_TEMP                   --keep-temp
@@ -98,6 +99,7 @@ opt AMV_SATELLITE_ICECHUNK_BASE --satellite-icechunk-base
 flag AMV_SKIP_GLOBAL               --skip-global
 flag AMV_REQUIRE_ALL_SATELLITES    --require-all-satellites
 flag AMV_SKIP_EXISTING             --skip-existing
+flag AMV_REPLACE_EXISTING          --replace-existing
 flag AMV_NO_NETCDF                 --no-netcdf
 flag AMV_KEEP_NETCDF               --keep-netcdf
 flag AMV_KEEP_TEMP                 --keep-temp
