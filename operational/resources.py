@@ -349,6 +349,18 @@ class RunSettingsResource(ConfigurableResource):
     Defaults mirror :class:`operational.config.OperationalConfig`.
     """
 
+    amv_icechunk_base: str = Field(
+        default="",
+        description=(
+            "Base of the per-satellite AMV icechunk stores.  Set, the "
+            "mosaic reads each satellite's scan from "
+            "<base>/amv_<sat_id>.icechunk, which is what lets the "
+            "satellites be retrieved on other hosts.  Empty, it reads "
+            "the per-satellite files from the output directory, as a "
+            "single-host deployment does."
+        ),
+    )
+
     satellites: list[str] = Field(
         default_factory=lambda: list(_DEFAULTS.satellites),
         description="Satellite ids to retrieve winds for.",

@@ -77,6 +77,7 @@ __all__ = [
     "PUBLISH_RETRY_POLICY",
     "per_satellite_path",
     "load_available_retrievals",
+    "load_retrievals_from_stores",
     "amv_asset_name",
     "build_mosaic_assets",
     "global_mosaic",
@@ -143,6 +144,50 @@ def load_available_retrievals(
                 per_sat[sat_id] = handle.load()
         except Exception:
             logger.exception("%s: could not read %s — treating as missing", sat_id, path)
+    return per_sat
+
+
+def load_retrievals_from_stores(
+    icechunk_base: str,
+    satellites: list[str],
+    t0: datetime,
+    *,
+    storage_kwargs: dict | None = None,
+) -> dict[str, xr.Dataset]:
+    """Load each satellite's scan for ``t0`` from its own icechunk store.
+
+    The filesystem equivalent, :func:`load_available_retrievals`, only
+    works when every satellite was retrieved on this host.  Reading the
+    stores instead lets the satellites run wherever there is a GPU and
+    lets the mosaic stitch whichever have landed.
+
+    A satellite whose store is absent, or which has not published this
+    timestamp yet, is skipped rather than raised on -- the same contract
+    as the file loader, because a mosaic of five satellites is worth
+    more than no mosaic at all.
+    """
+    from stereo_winds.icechunk_output import open_icechunk_repo, satellite_store_uri
+
+    per_sat: dict[str, xr.Dataset] = {}
+    for sat_id in satellites:
+        uri = satellite_store_uri(icechunk_base, sat_id)
+        try:
+            repo = open_icechunk_repo(uri, **(storage_kwargs or {}))
+            ds = xr.open_zarr(repo.readonly_session("main").store, consolidated=False)
+        except Exception:
+            logger.info("%s: no readable store at %s", sat_id, uri)
+            continue
+        try:
+            scan = ds.sel(time=np.datetime64(t0, "ns"))
+        except KeyError:
+            logger.info("%s: %s not published to %s yet", sat_id, t0, uri)
+            continue
+        except Exception:
+            logger.exception("%s: could not read %s — treating as missing", sat_id, uri)
+            continue
+        # Drop the now-scalar time so the mosaic sees the same shape it
+        # gets from a NetCDF: (y, x) per variable.
+        per_sat[sat_id] = scan.drop_vars("time").load()
     return per_sat
 
 
@@ -248,7 +293,18 @@ def build_mosaic_assets(
                 ", ".join(undeclared),
             )
 
-        per_sat = load_available_retrievals(output_dir, expected, t0)
+        # Prefer the per-satellite stores when the deployment publishes
+        # to them: they are what lets the satellites be retrieved on
+        # other hosts.  Fall back to the filesystem so a single-host
+        # deployment, and every existing partition, still work.
+        icechunk_base = run_settings.amv_icechunk_base
+        if icechunk_base:
+            context.log.info("Reading per-satellite retrievals from %s", icechunk_base)
+            per_sat = load_retrievals_from_stores(icechunk_base, expected, t0)
+            source = icechunk_base
+        else:
+            per_sat = load_available_retrievals(output_dir, expected, t0)
+            source = str(output_dir)
         absent = missing_satellites(per_sat, expected)
 
         if not per_sat:
@@ -260,7 +316,7 @@ def build_mosaic_assets(
                 metadata={
                     "partition": t0.isoformat(),
                     "missing_satellites": ",".join(absent),
-                    "searched_under": MetadataValue.path(str(output_dir)),
+                    "searched_under": MetadataValue.text(source),
                 },
             )
 
