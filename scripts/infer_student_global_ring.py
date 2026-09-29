@@ -1760,6 +1760,7 @@ def process_time(
     resolution_m: float = 2000.0,
     skip_global: bool = False,
     skip_existing: bool = False,
+    replace_existing: bool = False,
     repo=None,
     icechunk_branch: str = "main",
     icechunk_chunk: int = 1024,
@@ -1836,6 +1837,7 @@ def process_time(
             resolution_m=resolution_m,
             skip_global=skip_global,
             skip_existing=skip_existing,
+            replace_existing=replace_existing,
             repo=repo,
             icechunk_branch=icechunk_branch,
             icechunk_chunk=icechunk_chunk,
@@ -1868,6 +1870,7 @@ def _process_time_inner(
     resolution_m: float = 2000.0,
     skip_global: bool = False,
     skip_existing: bool = False,
+    replace_existing: bool = False,
     repo=None,
     icechunk_branch: str = "main",
     icechunk_chunk: int = 1024,
@@ -1999,20 +2002,24 @@ def _process_time_inner(
             logger.info("Saved global mosaic: %s", global_path)
 
         if repo is not None:
-            if t0 in icechunk_times:
+            if t0 in icechunk_times and not replace_existing:
                 logger.warning(
                     "[%s] already in the icechunk store — not appending a "
-                    "duplicate (use --skip-existing to skip it entirely)",
+                    "duplicate (use --skip-existing to skip it entirely, or "
+                    "--replace-existing to overwrite it)",
                     tag,
                 )
             else:
-                write_mosaic_to_icechunk(
+                outcome = write_mosaic_to_icechunk(
                     repo,
                     ds_global,
                     t0,
                     branch=icechunk_branch,
                     chunk=icechunk_chunk,
+                    replace=replace_existing,
                 )
+                if outcome == "replaced":
+                    logger.info("[%s] replaced the mosaic already in the store", tag)
                 icechunk_times.add(t0)
 
         # Summary stats.  Count in place rather than materialising a
@@ -2114,6 +2121,14 @@ def main():
         action="store_true",
         help="Skip timestamps whose output already exists in "
         "every configured sink (resume an interrupted range)",
+    )
+    ap.add_argument(
+        "--replace-existing",
+        action="store_true",
+        help="Overwrite a timestamp the icechunk store already holds, "
+        "instead of leaving it alone.  For re-running a range that was "
+        "committed while a satellite was missing: skipping would keep "
+        "the degraded mosaic and appending would duplicate the timestamp",
     )
 
     perf = ap.add_argument_group("throughput")
@@ -2354,7 +2369,14 @@ def main():
             force_path_style=args.icechunk_force_path_style,
         )
         icechunk_times = icechunk_existing_times(repo, args.icechunk_branch)
-        if icechunk_times and not args.skip_existing:
+        if icechunk_times and args.replace_existing:
+            logger.warning(
+                "Store already holds %d timestamp(s) and --replace-existing "
+                "was given; any of them inside this range will be recomputed "
+                "and overwritten in place",
+                len(icechunk_times),
+            )
+        elif icechunk_times and not args.skip_existing:
             logger.warning(
                 "Store already holds %d timestamp(s) and --skip-existing was "
                 "not given; timestamps already present will not be appended "
@@ -2396,6 +2418,7 @@ def main():
                 resolution_m=args.resolution_m,
                 skip_global=args.skip_global,
                 skip_existing=args.skip_existing,
+                replace_existing=args.replace_existing,
                 repo=repo,
                 icechunk_branch=args.icechunk_branch,
                 icechunk_chunk=args.icechunk_chunk,
