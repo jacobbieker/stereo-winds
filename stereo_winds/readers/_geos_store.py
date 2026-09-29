@@ -110,6 +110,16 @@ class GeoStoreReader:
     # time.  A reader serving one satellite can still use a plain string.
     store_discovery_prefix: str | dict[str, str] = ""
 
+    # Name this satellite goes by in ``geo/virtualized`` (``gk2a_ami``
+    # for GK-2A), or None to leave that tier alone.  Those stores
+    # reference the original L1b objects rather than copying them, so
+    # they cover instruments that were never materialised here -- but a
+    # read costs a ranged GET per chunk against another bucket, which
+    # measures slower than a materialised store.  They are therefore
+    # tried *after* the real stores and before the satpy fallback: a win
+    # where there is nothing else, never a cost where there is.
+    virtual_satellite: str | dict[str, str] | None = None
+
     scan_interval_minutes: int = 10
 
     coord_names: dict[str, list[str]] = {
@@ -288,7 +298,18 @@ class GeoStoreReader:
         # Same tier first (a newer ingest of the same grid), then the rest.
         same_tier = [p for p in others if tier in p and p != preferred]
         rest = [p for p in others if tier not in p and p != preferred]
-        return [preferred, *same_tier, *rest]
+        return [preferred, *same_tier, *rest, *self._virtual_candidates(band)]
+
+    def _virtual_candidates(self, band: str) -> list[str]:
+        """Virtualized stores for ``band``, or none if the tier is off."""
+        name = self.virtual_satellite
+        if isinstance(name, dict):
+            name = name.get(self.satellite)
+        if not name:
+            return []
+        from stereo_winds.readers._virtual_store import virtual_store_for
+
+        return virtual_store_for(self.bucket, self.endpoint, name, band)
 
     def _store_contents(self, prefix: str):
         """(bands, first scan, last scan) for a store, or None if unusable."""
@@ -358,7 +379,7 @@ class GeoStoreReader:
             if cached is not None:
                 return cached
             logger.info("Opening icechunk store %s/%s", self.bucket, prefix)
-            ds = xr.open_zarr(self._open_store(prefix))
+            ds = self._open_as_dataset(prefix)
             if "time" in ds.dims:
                 # Drop duplicate timestamps, then sort for nearest-neighbour
                 # lookup.
@@ -366,6 +387,30 @@ class GeoStoreReader:
                 ds = ds.isel(time=np.sort(unique_idx)).sortby("time")
             _OPEN_DATASETS[key] = ds
             return ds
+
+    def _open_as_dataset(self, prefix: str) -> xr.Dataset:
+        """Open ``prefix``, normalising it if it is a virtualized store.
+
+        A virtualized store holds one band under the instrument's own
+        variable name over a ``t`` axis; normalising presents it the way
+        the materialised stores present themselves, so store selection,
+        time selection and radiance extraction below cannot tell the
+        tiers apart.
+        """
+        from stereo_winds.readers import _virtual_store as virtual
+
+        if not prefix.startswith(f"{virtual.VIRTUAL_ROOT}/"):
+            return xr.open_zarr(self._open_store(prefix))
+
+        parsed = virtual.parse_store_name(prefix.rsplit("/", 1)[-1])
+        if parsed is None:  # pragma: no cover - guarded by _virtual_candidates
+            raise ValueError(f"{prefix} is not a virtualized store name")
+        # The archive spells bands in lower case; the readers in upper.
+        return virtual.normalise(
+            virtual.open_virtual_dataset(self.bucket, self.endpoint, prefix),
+            parsed,
+            parsed.band.upper(),
+        )
 
     def _select_time(
         self,
