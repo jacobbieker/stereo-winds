@@ -2222,8 +2222,14 @@ def main():
     )
     args = ap.parse_args()
 
-    if args.no_netcdf and not args.icechunk_store:
-        ap.error("--no-netcdf requires --icechunk-store; otherwise nothing " "would be written")
+    # Either sink counts: a per-satellite run publishes to its own stores
+    # and writes no mosaic at all, so requiring --icechunk-store here
+    # would reject exactly the configuration the containers use.
+    if args.no_netcdf and not (args.icechunk_store or args.satellite_icechunk_base):
+        ap.error(
+            "--no-netcdf requires --icechunk-store or "
+            "--satellite-icechunk-base; otherwise nothing would be written"
+        )
     if args.no_netcdf and args.keep_netcdf:
         ap.error("--no-netcdf and --keep-netcdf ask for opposite things")
     if args.keep_temp and not args.icechunk_store:

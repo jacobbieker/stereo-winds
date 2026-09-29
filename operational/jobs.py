@@ -86,6 +86,9 @@ __all__ = [
     "INGEST_JOB_NAME",
     "INGEST_GROUP",
     "build_ingest_job",
+    "build_amv_container_job",
+    "AMV_CONTAINER_JOB_NAME",
+    "AMV_CONTAINER_GROUP",
     "MAX_CONCURRENT_ENV_VAR",
     "RUN_TAGS",
     "build_backstop_schedule",
@@ -107,6 +110,13 @@ INGEST_JOB_NAME = "operational_ingest_job"
 #: Asset group holding the EUMETSAT ingest.  Named here rather than
 #: imported so this module stays independent of the asset modules.
 INGEST_GROUP = "satellite_ingest"
+
+#: Asset group holding the containerised per-satellite retrieval.  It is
+#: an alternative to the in-process AMV assets, not an addition: both in
+#: one job would retrieve every satellite twice and write the same
+#: partition from two directions.
+AMV_CONTAINER_GROUP = "amv_containers"
+AMV_CONTAINER_JOB_NAME = "operational_amv_container_job"
 
 #: Name of the belt-and-braces schedule built by
 #: :func:`build_backstop_schedule`.
@@ -224,6 +234,33 @@ def _job_kwargs(
     }
 
 
+def build_amv_container_job(
+    *,
+    name: str = AMV_CONTAINER_JOB_NAME,
+    selection: Any = None,
+    max_concurrent: int | None = None,
+    retry_policy: RetryPolicy | None = None,
+    tags: Mapping[str, str] | None = None,
+) -> UnresolvedAssetJobDefinition:
+    """Build the job that retrieves every satellite as a container.
+
+    Separate from the full job because it is the *other* way of doing
+    the same work: the in-process assets and these write the same
+    partition, so a deployment runs one or the other.
+    """
+    return _define_asset_job(
+        name=name,
+        selection=(AssetSelection.groups(AMV_CONTAINER_GROUP) if selection is None else selection),
+        description=(
+            "Retrieve every satellite for one timestamp as independent "
+            "containers, each publishing to its own icechunk store."
+        ),
+        max_concurrent=max_concurrent,
+        retry_policy=retry_policy,
+        tags=tags,
+    )
+
+
 def build_ingest_job(
     *,
     name: str = INGEST_JOB_NAME,
@@ -262,7 +299,11 @@ def build_full_job(
     EUMETSAT, and would stop a deployment without a Docker daemon from
     running the retrieval at all.  :func:`build_ingest_job` covers it.
     """
-    default = AssetSelection.all() - AssetSelection.groups(INGEST_GROUP)
+    default = (
+        AssetSelection.all()
+        - AssetSelection.groups(INGEST_GROUP)
+        - AssetSelection.groups(AMV_CONTAINER_GROUP)
+    )
     return _define_asset_job(
         name=name,
         selection=default if selection is None else selection,

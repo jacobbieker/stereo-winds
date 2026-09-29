@@ -91,12 +91,15 @@ from operational import sensors as sensors_module
 from operational.assets import amv_assets as amv_assets_module
 from dagster_docker import PipesDockerClient
 
+from operational.amv_container import AmvContainerResource
+from operational.assets.amv_container_assets import build_amv_container_assets
 from operational.assets.consumer_assets import build_consumer_assets
 from operational.assets.mosaic_assets import global_mosaic, published_mosaic
 from operational.config import OperationalConfig
 from operational.core.partitions import cron_for_cadence
 from operational.satellite_consumer import SatelliteConsumerResource
 from operational.jobs import (
+    build_amv_container_job,
     build_ingest_job,
     build_backstop_schedule,
     build_full_job,
@@ -263,6 +266,19 @@ def default_resources(
         # Launches the consumer container.  Constructed here rather than
         # inside the asset so a code location without a Docker daemon
         # still loads: the client only contacts one when a run starts.
+        "amv_container": AmvContainerResource(
+            image=_env_or(
+                "STEREO_WINDS_OP_AMV_IMAGE",
+                AmvContainerResource.model_fields["image"].default,
+                env,
+            ),
+            icechunk_base=_env_or(
+                "STEREO_WINDS_OP_AMV_ICECHUNK_BASE",
+                AmvContainerResource.model_fields["icechunk_base"].default,
+                env,
+            ),
+            device=_env_or("STEREO_WINDS_OP_DEVICE", cfg.device, env),
+        ),
         "pipes_docker_client": PipesDockerClient(),
     }
 
@@ -406,6 +422,11 @@ def build_definitions(
     # The EUMETSAT ingest assets share the retrieval's partition axis, so
     # a cycle can be consumed and retrieved under the same partition key.
     consumer_by_sat = build_consumer_assets(partitions)
+    # The containerised retrieval, one asset per satellite.  Defined
+    # alongside the in-process assets rather than replacing them: a
+    # deployment picks a group, and both writing the same partition from
+    # different directions would be the worst of both.
+    amv_containers = build_amv_container_assets(list(amv_by_sat), partitions)
     satellite_keys = {sat_id: list(asset_def.keys) for sat_id, asset_def in amv_by_sat.items()}
     check_satellite_agreement(cfg, satellite_keys)
     check_mosaic_inputs(key for keys in satellite_keys.values() for key in keys)
@@ -415,6 +436,7 @@ def build_definitions(
     jobs = [
         full_job,
         build_ingest_job(max_concurrent=max_concurrent),
+        build_amv_container_job(max_concurrent=max_concurrent),
         *build_satellite_jobs(satellite_keys, max_concurrent=max_concurrent),
     ]
     schedule = build_backstop_schedule(full_job, partitions)
@@ -428,6 +450,7 @@ def build_definitions(
     return Definitions(
         assets=[
             *consumer_by_sat.values(),
+            *amv_containers.values(),
             *amv_by_sat.values(),
             global_mosaic,
             published_mosaic,
