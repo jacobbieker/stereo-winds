@@ -73,15 +73,26 @@ def consumer_asset_name(key: str) -> str:
 
 
 def _window(sat: ConsumerSatellite, t0: datetime) -> "tuple[datetime, datetime]":
-    """The ``[t0, t0 + cadence)`` window a partition stands for.
+    """The ``[t0 - cadence, t0 + 2 * cadence)`` window a partition needs.
 
-    The partition is an instant; the consumer takes a range and treats
-    the end as exclusive of nothing in particular, so the window is one
-    of the satellite's own repeat cycles.  A 10 minute partition on a 15
-    minute instrument would otherwise ask for a cycle that does not
-    exist and record a materialisation that consumed nothing.
+    Three of the satellite's own repeat cycles, not one: the retrieval
+    reads ``t0 - delta``, ``t0`` and ``t0 + delta`` to get a temporal
+    pair either side of the partition, so ingesting only the ``t0``
+    cycle leaves it two frames short and it fails on a store that looks
+    fully populated for the timestamp it was asked for.
+
+    Cycles rather than fixed minutes because the instruments differ --
+    10 minutes for FCI, 15 for SEVIRI -- and a window in minutes would
+    ask one of them for a cycle that does not exist and record a
+    materialisation that consumed nothing.
+
+    The neighbouring partitions' windows overlap this one by a cycle at
+    each end.  That is deliberate and cheap: the consumer skips a cycle
+    already in the store, and the alternative is a retrieval that
+    depends on its neighbours having been materialised first.
     """
-    return t0, t0 + timedelta(minutes=sat.cadence_mins)
+    cycle = timedelta(minutes=sat.cadence_mins)
+    return t0 - cycle, t0 + 2 * cycle
 
 
 def build_consumer_asset(
