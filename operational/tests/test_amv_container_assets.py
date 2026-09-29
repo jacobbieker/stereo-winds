@@ -173,3 +173,29 @@ class TestAssets:
         env = client.run.call_args.kwargs["env"]
         assert env["AMV_FLOW_BANDS"] == "C08,C14"
         assert env["AMV_RAD_BANDS"] == "C07,C13"
+
+    def test_asks_docker_for_the_gpu(self, resource, settings):
+        """Without a device request the container sees no GPU, and the
+        retrieval dies loading a checkpoint onto cuda rather than
+        falling back to the CPU."""
+        _, client = self._run("goes18", resource, settings, "2026-09-20-12:00")
+        requests = client.run.call_args.kwargs["container_kwargs"]["device_requests"]
+        assert requests == [{"Driver": "nvidia", "Count": -1, "Capabilities": [["gpu"]]}]
+
+    def test_cpu_run_asks_for_no_device(self, settings):
+        resource = AmvContainerResource(
+            aws_access_key_id="k",
+            aws_secret_access_key="s",
+            gpus="none",
+            device="cpu",
+        )
+        _, client = self._run("goes18", resource, settings, "2026-09-20-12:00")
+        assert client.run.call_args.kwargs["container_kwargs"] == {}
+
+    def test_a_count_is_passed_through(self, settings):
+        resource = AmvContainerResource(
+            aws_access_key_id="k",
+            aws_secret_access_key="s",
+            gpus="2",
+        )
+        assert resource.container_kwargs()["device_requests"][0]["Count"] == 2

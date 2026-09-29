@@ -107,6 +107,7 @@ def build_amv_container_asset(
         result = pipes_docker_client.run(
             image=amv_container.image,
             env={**env, **amv_container.credential_env()},
+            container_kwargs=amv_container.container_kwargs(),
             context=context,
         )
 
