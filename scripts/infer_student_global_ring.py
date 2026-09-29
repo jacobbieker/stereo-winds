@@ -127,7 +127,9 @@ from stereo_winds.icechunk_output import (
     icechunk_existing_times,
     icechunk_storage,
     open_icechunk_repo,
+    satellite_store_uri,
     write_mosaic_to_icechunk,
+    write_satellite_to_icechunk,
 )
 from stereo_winds.readers._cache import (
     DEFAULT_DOWNLOAD_WORKERS,
@@ -1718,6 +1720,33 @@ def merge_global(
 # ---------------------------------------------------------------------------
 
 
+class SatelliteStores:
+    """One icechunk repository per satellite, opened on first use.
+
+    Separate stores rather than one with a satellite axis: the grids
+    differ between instruments, and a satellite retrieved on another host
+    must be able to publish without meeting a second writer in the same
+    repository.
+    """
+
+    def __init__(self, base: str, **storage_kwargs) -> None:
+        self.base = base
+        self._storage_kwargs = storage_kwargs
+        self._repos: dict[str, object] = {}
+
+    def repo(self, sat_id: str):
+        """The repository for ``sat_id``, created on first request."""
+        repo = self._repos.get(sat_id)
+        if repo is None:
+            uri = satellite_store_uri(self.base, sat_id)
+            repo = open_icechunk_repo(uri, **self._storage_kwargs)
+            self._repos[sat_id] = repo
+        return repo
+
+    def uri(self, sat_id: str) -> str:
+        return satellite_store_uri(self.base, sat_id)
+
+
 def process_time(
     t0: datetime,
     sats: list[str],
@@ -1737,6 +1766,7 @@ def process_time(
     icechunk_times: set[datetime] | None = None,
     write_netcdf: bool = True,
     global_netcdf: bool = True,
+    sat_stores: "SatelliteStores | None" = None,
     temp_dir: Path | None = None,
     keep_temp: bool = False,
     prefetcher: ScenePrefetcher | None = None,
@@ -1812,6 +1842,7 @@ def process_time(
             icechunk_times=icechunk_times,
             write_netcdf=write_netcdf,
             global_netcdf=global_netcdf,
+            sat_stores=sat_stores,
             prefetcher=prefetcher,
         )
     finally:
@@ -1843,6 +1874,7 @@ def _process_time_inner(
     icechunk_times: set[datetime] | None = None,
     write_netcdf: bool = True,
     global_netcdf: bool = True,
+    sat_stores: "SatelliteStores | None" = None,
     prefetcher: ScenePrefetcher | None = None,
 ) -> bool:
     """One timestamp, with the per-satellite directory already decided.
@@ -1914,6 +1946,24 @@ def _process_time_inner(
             except Exception:
                 logger.exception("[%s] Failed to process %s — skipping", tag, sat_id)
                 continue
+        if sat_stores is not None:
+            # Published per satellite and before the mosaic, so a stitch
+            # elsewhere can start on whichever disks have landed instead
+            # of waiting for the slowest satellite.  A publish that fails
+            # must not cost the mosaic a satellite it already has in
+            # hand, so it is reported and stepped over.
+            try:
+                write_satellite_to_icechunk(
+                    sat_stores.repo(sat_id), ds, t0, branch=icechunk_branch, chunk=icechunk_chunk
+                )
+            except Exception:
+                logger.exception(
+                    "[%s] Could not publish %s to its store; the disk is "
+                    "still usable for this mosaic",
+                    tag,
+                    sat_id,
+                )
+
         try:
             if mosaic is not None:
                 mosaic.add(sat_id, ds)
@@ -2131,6 +2181,15 @@ def main():
         help="Use path-style S3 addressing (needed by minio and " "source.coop)",
     )
     ic.add_argument(
+        "--satellite-icechunk-base",
+        default=None,
+        help="Publish each satellite's full disk to its own icechunk "
+        "store beneath this base, as <base>/amv_<sat_id>.icechunk. "
+        "Separate stores so satellites retrieved on different hosts "
+        "never share a writer, and so a stitch can start on whichever "
+        "have landed.",
+    )
+    ic.add_argument(
         "--no-netcdf",
         action="store_true",
         help="Write only to the icechunk store, skipping the "
@@ -2264,6 +2323,20 @@ def main():
         logger.info("Prefetching scenes on %d worker(s)", args.prefetch_workers)
 
     # Optional icechunk sink, and the timestamps it already holds (resume)
+    sat_stores = None
+    if args.satellite_icechunk_base:
+        sat_stores = SatelliteStores(
+            args.satellite_icechunk_base,
+            endpoint_url=args.icechunk_endpoint,
+            region=args.icechunk_region,
+            anonymous=args.icechunk_anonymous,
+            force_path_style=args.icechunk_force_path_style,
+        )
+        logger.info(
+            "Publishing each satellite to %s/amv_<sat_id>.icechunk",
+            args.satellite_icechunk_base.rstrip("/"),
+        )
+
     repo = None
     icechunk_times: set[datetime] = set()
     if args.icechunk_store:
@@ -2323,6 +2396,7 @@ def main():
                 icechunk_times=icechunk_times,
                 write_netcdf=not args.no_netcdf,
                 global_netcdf=global_netcdf,
+                sat_stores=sat_stores,
                 temp_dir=temp_dir,
                 keep_temp=args.keep_temp,
                 prefetcher=prefetcher,

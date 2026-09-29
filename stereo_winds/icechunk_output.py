@@ -316,15 +316,25 @@ def _time_index(session, t0: datetime) -> int | None:
     return int(hits[0]) if hits.size else None
 
 
-def _align_for_append(ds: xr.Dataset, existing: set[str]) -> xr.Dataset:
+def _align_for_append(
+    ds: xr.Dataset,
+    existing: set[str],
+    per_timestep: set[str] | None = None,
+) -> xr.Dataset:
     """Match ``ds`` to the per-timestep variables the store already has.
 
     A store written before the quality variables existed has none of
     them, and appending a dataset that carries extra variables fails.
     Equally, a store that has them needs every append to supply them,
     or the arrays fall out of step with the time axis.
+
+    ``per_timestep`` names the variables this applies to.  It defaults to
+    a mosaic's set; a per-satellite store has a different one, and using
+    the mosaic's there would let an unrecognised variable through to an
+    append that then fails on the store's own schema.
     """
-    per_timestep = set(_PER_TIMESTEP_ATTRS) | {"satellites_contributing"}
+    if per_timestep is None:
+        per_timestep = set(_PER_TIMESTEP_ATTRS) | {"satellites_contributing"}
     extra = [n for n in ds.data_vars if n in per_timestep and n not in existing]
     if extra:
         logger.info(
@@ -413,5 +423,131 @@ def write_mosaic_to_icechunk(
         _update_store_vocabulary(session, vocabulary)
 
     commit = session.commit(f"student AMV global mosaic {time_tag(t0)}")
+    logger.info("Committed %s to icechunk (%s)", time_tag(t0), commit)
+    return outcome
+
+
+# ---------------------------------------------------------------------------
+# Per-satellite stores
+# ---------------------------------------------------------------------------
+
+#: Attributes that describe *one scan* rather than the satellite.
+#:
+#: ``sub_satellite_longitude`` is the one that matters: it comes from each
+#: scene's own projection metadata and drifts within the station-keeping
+#: box, so freezing it as a group attribute would describe every scan in
+#: the store by whichever one happened to be written last.  The quality
+#: attributes vary per scan for the same reason they do in a mosaic.
+_SATELLITE_PER_TIMESTEP_ATTRS = (
+    "sub_satellite_longitude",
+    "sub_satellite_longitude_source",
+    "nominal_sub_satellite_longitude",
+    "satellite_height_m",
+    "quality_degraded",
+    "quality_note",
+    "bands_requested",
+    "bands_missing",
+    "n_bands_requested",
+    "n_bands_missing",
+    "flow_bands_missing",
+    "time",
+)
+
+#: Attributes that genuinely describe the whole store.
+_SATELLITE_STORE_ATTRS = ("satellite_id", "source")
+
+
+def _satellite_per_timestep_vars() -> set[str]:
+    """Variable names a per-satellite store carries one value per scan."""
+    return {("scan_time" if a == "time" else a) for a in _SATELLITE_PER_TIMESTEP_ATTRS}
+
+
+def satellite_store_uri(base: str, sat_id: str) -> str:
+    """Store URI for one satellite under ``base``.
+
+    One store per satellite rather than one store with a satellite axis:
+    the grids differ (5568² for FCI, 5424² for ABI, 3712² for SEVIRI), so
+    they cannot share x/y without regridding, and separate stores let the
+    satellites be retrieved concurrently on different hosts without two
+    writers ever meeting in the same repository.
+    """
+    return f"{base.rstrip('/')}/amv_{sat_id.replace('-', '_')}.icechunk"
+
+
+def _satellite_with_time(ds_sat: xr.Dataset, t0: datetime) -> xr.Dataset:
+    """Add a length-1 time dimension so one scan can be appended."""
+    ds = ds_sat.expand_dims(time=[np.datetime64(t0, "ns")])
+    per_scan = {k: ds_sat.attrs[k] for k in _SATELLITE_PER_TIMESTEP_ATTRS if k in ds_sat.attrs}
+    ds.attrs = {k: v for k, v in ds_sat.attrs.items() if k in _SATELLITE_STORE_ATTRS}
+    for name, value in per_scan.items():
+        # "time" is already the dimension; keep the scan's own stamp under
+        # a name that does not collide with it.
+        key = "scan_time" if name == "time" else name
+        ds[key] = ("time", _timestep_value(value))
+    # Encoding carried over from a NetCDF source does not apply to zarr.
+    for var in ds.variables.values():
+        var.encoding = {}
+    return ds
+
+
+def write_satellite_to_icechunk(
+    repo,
+    ds_sat: xr.Dataset,
+    t0: datetime,
+    branch: str = "main",
+    chunk: int = 1024,
+    replace: bool = False,
+) -> str:
+    """Write one satellite's full disk to its store as a new commit.
+
+    The grid coordinates (``latitude``, ``longitude``, ``zenith_angle``)
+    are written once with the first scan and not repeated: they are a
+    property of the satellite's fixed grid, and at 5568² they would cost
+    ~370 MB per scan to restate.  The drift that *does* occur is recorded
+    per scan in ``sub_satellite_longitude``.
+
+    Returns ``"created"``, ``"appended"``, ``"replaced"`` or ``"skipped"``.
+    """
+    ds = _satellite_with_time(ds_sat, t0)
+    session = repo.writable_session(branch)
+
+    existing_at = _time_index(session, t0) if _store_has_dataset(session) else None
+    if existing_at is not None:
+        if not replace:
+            logger.info("%s already in the store; leaving it alone", time_tag(t0))
+            return "skipped"
+        region_ds = ds.drop_vars([n for n in ds.variables if "time" not in ds[n].dims])
+        region_ds = region_ds.drop_vars("time")
+        region_ds.to_zarr(
+            session.store, consolidated=False, region={"time": slice(existing_at, existing_at + 1)}
+        )
+        commit = session.commit(
+            f"student AMV {ds.attrs.get('satellite_id', '?')} " f"{time_tag(t0)} (replaced)"
+        )
+        logger.info("Replaced %s in icechunk (%s)", time_tag(t0), commit)
+        return "replaced"
+
+    if not _store_has_dataset(session):
+        encoding: dict[str, dict] = {"time": dict(_TIME_ENCODING)}
+        for name, var in ds.data_vars.items():
+            if var.ndim < 3:
+                continue
+            encoding[name] = {
+                "chunks": (1, min(chunk, var.shape[1]), min(chunk, var.shape[2])),
+            }
+        ds.to_zarr(session.store, mode="w", consolidated=False, zarr_format=3, encoding=encoding)
+        logger.info(
+            "Created icechunk dataset for %s (chunks %d x %d)",
+            ds.attrs.get("satellite_id", "?"),
+            chunk,
+            chunk,
+        )
+        outcome = "created"
+    else:
+        ds = _align_for_append(ds, _store_variables(session), _satellite_per_timestep_vars())
+        ds.to_zarr(session.store, mode="a-", append_dim="time", consolidated=False)
+        outcome = "appended"
+
+    commit = session.commit(f"student AMV {ds.attrs.get('satellite_id', '?')} {time_tag(t0)}")
     logger.info("Committed %s to icechunk (%s)", time_tag(t0), commit)
     return outcome

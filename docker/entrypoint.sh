@@ -26,6 +26,7 @@
 #   AMV_ICECHUNK_ENDPOINT           --icechunk-endpoint
 #   AMV_ICECHUNK_REGION             --icechunk-region
 #   AMV_TEMP_DIR                    --temp-dir       (image default: /output)
+#   AMV_SATELLITE_ICECHUNK_BASE     --satellite-icechunk-base
 # Flags (true/1/yes to enable):
 #   AMV_SKIP_GLOBAL                 --skip-global
 #   AMV_REQUIRE_ALL_SATELLITES      --require-all-satellites
@@ -92,6 +93,7 @@ opt AMV_ICECHUNK_CHUNK         --icechunk-chunk
 opt AMV_ICECHUNK_ENDPOINT      --icechunk-endpoint
 opt AMV_ICECHUNK_REGION        --icechunk-region
 opt AMV_TEMP_DIR               --temp-dir
+opt AMV_SATELLITE_ICECHUNK_BASE --satellite-icechunk-base
 
 flag AMV_SKIP_GLOBAL               --skip-global
 flag AMV_REQUIRE_ALL_SATELLITES    --require-all-satellites
