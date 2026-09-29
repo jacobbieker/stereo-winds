@@ -73,8 +73,8 @@ class TestConstructor:
 
     def test_store_prefix(self):
         g = GK2A()
-        assert g._store_prefix("2000m") == "geo/gk2a_2000m.icechunk"
-        assert g._store_prefix("500m") == "geo/gk2a_500m.icechunk"
+        assert g._store_prefix("2000m") == "geo/gk2a_2000m_test.icechunk"
+        assert g._store_prefix("500m") == "geo/gk2a_500m_test.icechunk"
 
     def test_repr(self):
         g = GK2A(bands=["IR112"])

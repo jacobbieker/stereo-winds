@@ -110,6 +110,16 @@ class GeoStoreReader:
     # time.  A reader serving one satellite can still use a plain string.
     store_discovery_prefix: str | dict[str, str] = ""
 
+    # Name this satellite goes by in ``geo/virtualized`` (``gk2a_ami``
+    # for GK-2A), or None to leave that tier alone.  Those stores
+    # reference the original L1b objects rather than copying them, so
+    # they cover instruments that were never materialised here -- but a
+    # read costs a ranged GET per chunk against another bucket, which
+    # measures slower than a materialised store.  They are therefore
+    # tried *after* the real stores and before the satpy fallback: a win
+    # where there is nothing else, never a cost where there is.
+    virtual_satellite: str | dict[str, str] | None = None
+
     scan_interval_minutes: int = 10
 
     coord_names: dict[str, list[str]] = {
@@ -288,7 +298,18 @@ class GeoStoreReader:
         # Same tier first (a newer ingest of the same grid), then the rest.
         same_tier = [p for p in others if tier in p and p != preferred]
         rest = [p for p in others if tier not in p and p != preferred]
-        return [preferred, *same_tier, *rest]
+        return [preferred, *same_tier, *rest, *self._virtual_candidates(band)]
+
+    def _virtual_candidates(self, band: str) -> list[str]:
+        """Virtualized stores for ``band``, or none if the tier is off."""
+        name = self.virtual_satellite
+        if isinstance(name, dict):
+            name = name.get(self.satellite)
+        if not name:
+            return []
+        from stereo_winds.readers._virtual_store import virtual_store_for
+
+        return virtual_store_for(self.bucket, self.endpoint, name, band)
 
     def _store_contents(self, prefix: str):
         """(bands, first scan, last scan) for a store, or None if unusable."""
@@ -358,7 +379,8 @@ class GeoStoreReader:
             if cached is not None:
                 return cached
             logger.info("Opening icechunk store %s/%s", self.bucket, prefix)
-            ds = xr.open_zarr(self._open_store(prefix))
+            ds = self._open_as_dataset(prefix)
+            ds = self._index_by_scan_start(ds, prefix)
             if "time" in ds.dims:
                 # Drop duplicate timestamps, then sort for nearest-neighbour
                 # lookup.
@@ -366,6 +388,85 @@ class GeoStoreReader:
                 ds = ds.isel(time=np.sort(unique_idx)).sortby("time")
             _OPEN_DATASETS[key] = ds
             return ds
+
+    def _index_by_scan_start(self, ds: xr.Dataset, prefix: str) -> xr.Dataset:
+        """Re-index a store that labels its scans by when they *ended*.
+
+        The ``_test`` ingests label each record by the end of the
+        observation -- ``gk2a_2000m_test`` by the end timestamp itself,
+        ``himawari_2000m_test`` and ``iodc_3000m_test`` by the slot that
+        end falls in.  satpy, the public-S3 fallback and the GOES reader
+        all label by the *start*.  Left alone, a request for 06:00 hands
+        back the scan that ran 05:50-06:00, so every satellite on one of
+        these stores sits a full cycle behind the ones that are not --
+        inside a mosaic that claims a single valid time.
+
+        The start is recovered from ``observation_end_time``, which the
+        stores carry, floored to the instrument's repeat cycle: a scan
+        ending 05:59:41 on a 10 minute cycle began at 05:50, and one
+        ending 05:57:38 on a 15 minute cycle began at 05:45.  Flooring
+        the recorded end rather than subtracting a fixed offset means a
+        store that already labels by start is left exactly as it is, so
+        this becomes a no-op if the ingest is corrected upstream.
+        """
+        if "observation_end_time" not in ds.data_vars or "time" not in ds.dims:
+            return ds
+        try:
+            ends = np.asarray(ds["observation_end_time"].values, "datetime64[ns]").reshape(
+                ds.sizes["time"], -1
+            )[:, 0]
+        except Exception:
+            logger.warning(
+                "%s carries observation_end_time but it could not be read; "
+                "leaving the time axis as the store labelled it",
+                prefix,
+                exc_info=True,
+            )
+            return ds
+
+        cycle = np.timedelta64(int(self.scan_interval_minutes) * 60, "s").astype("timedelta64[ns]")
+        epoch = np.datetime64(0, "ns")
+        starts = epoch + ((ends - epoch) // cycle) * cycle
+
+        labelled = np.asarray(ds["time"].values, "datetime64[ns]")
+        shift = starts - labelled
+        moved = int(np.count_nonzero(shift != np.timedelta64(0, "ns")))
+        if not moved:
+            return ds
+        median = np.median(shift.astype("timedelta64[s]").astype(np.int64)) / 60.0
+        logger.info(
+            "%s labels scans by their end; re-indexing %d of %d records to "
+            "the scan start (median %+.0f min)",
+            prefix,
+            moved,
+            len(labelled),
+            median,
+        )
+        return ds.assign_coords(time=("time", starts))
+
+    def _open_as_dataset(self, prefix: str) -> xr.Dataset:
+        """Open ``prefix``, normalising it if it is a virtualized store.
+
+        A virtualized store holds one band under the instrument's own
+        variable name over a ``t`` axis; normalising presents it the way
+        the materialised stores present themselves, so store selection,
+        time selection and radiance extraction below cannot tell the
+        tiers apart.
+        """
+        from stereo_winds.readers import _virtual_store as virtual
+
+        if not prefix.startswith(f"{virtual.VIRTUAL_ROOT}/"):
+            return xr.open_zarr(self._open_store(prefix))
+
+        parsed = virtual.parse_store_name(prefix.rsplit("/", 1)[-1])
+        if parsed is None:  # pragma: no cover - guarded by _virtual_candidates
+            raise ValueError(f"{prefix} is not a virtualized store name")
+        # The archive spells bands in lower case; the readers in upper.
+        return virtual.normalise(
+            virtual.open_virtual_dataset(self.bucket, self.endpoint, prefix),
+            parsed,
+            parsed.band.upper(),
+        )
 
     def _select_time(
         self,

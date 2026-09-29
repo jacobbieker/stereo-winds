@@ -19,6 +19,7 @@ NOAA's public bucket (``s3://noaa-gk2a-pds``) with satpy instead.
 
 Requires ``icechunk`` and ``zarr>=3``.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -64,22 +65,22 @@ _BAND_RESOLUTION: dict[str, str] = {
 
 # ABI band name -> AMI equivalent (closest spectral centre).
 _ABI_TO_AMI: dict[str, str] = {
-    "C01": "VI004",   # 0.47 / 0.47 um
-    "C02": "VI006",   # 0.64 / 0.64 um
-    "C03": "VI008",   # 0.865 / 0.86 um
-    "C04": "NR013",   # 1.378 / 1.37 um
-    "C05": "NR016",   # 1.61 / 1.6 um
+    "C01": "VI004",  # 0.47 / 0.47 um
+    "C02": "VI006",  # 0.64 / 0.64 um
+    "C03": "VI008",  # 0.865 / 0.86 um
+    "C04": "NR013",  # 1.378 / 1.37 um
+    "C05": "NR016",  # 1.61 / 1.6 um
     # C06 (2.25 um) has no AMI equivalent -- omitted
-    "C07": "SW038",   # 3.90 / 3.8 um
-    "C08": "WV063",   # 6.19 / 6.3 um
-    "C09": "WV069",   # 6.95 / 6.9 um
-    "C10": "WV073",   # 7.34 / 7.3 um
-    "C11": "IR087",   # 8.44 / 8.7 um
-    "C12": "IR096",   # 9.61 / 9.6 um
-    "C13": "IR105",   # 10.35 / 10.5 um
-    "C14": "IR112",   # 11.20 / 11.2 um
-    "C15": "IR123",   # 12.30 / 12.3 um
-    "C16": "IR133",   # 13.30 / 13.3 um
+    "C07": "SW038",  # 3.90 / 3.8 um
+    "C08": "WV063",  # 6.19 / 6.3 um
+    "C09": "WV069",  # 6.95 / 6.9 um
+    "C10": "WV073",  # 7.34 / 7.3 um
+    "C11": "IR087",  # 8.44 / 8.7 um
+    "C12": "IR096",  # 9.61 / 9.6 um
+    "C13": "IR105",  # 10.35 / 10.5 um
+    "C14": "IR112",  # 11.20 / 11.2 um
+    "C15": "IR123",  # 12.30 / 12.3 um
+    "C16": "IR133",  # 13.30 / 13.3 um
 }
 
 _BUCKET = "bkr"
@@ -89,7 +90,7 @@ _ENDPOINT = "https://data.source.coop"
 # icechunk store does not cover the requested time.
 _S3_BUCKET = "noaa-gk2a-pds"
 _S3_PREFIX = "AMI/L1B/FD"
-_FULL_DISK_MINUTES = 10          # AMI full-disk scan cadence
+_FULL_DISK_MINUTES = 10  # AMI full-disk scan cadence
 
 
 def _resolve_band(band: str) -> str:
@@ -123,15 +124,20 @@ class GK2A(GeoStoreReader):
 
     band_resolution = _BAND_RESOLUTION
     abi_to_native = _ABI_TO_AMI
-    band_name_hint = (
-        "Use AMI names (VI004-IR133) or ABI names (C01-C16)."
-    )
+    band_name_hint = "Use AMI names (VI004-IR133) or ABI names (C01-C16)."
     default_band = "IR112"
 
-    store_template = "geo/gk2a_{resolution}.icechunk"
+    # The `_test` stores are the live ones: there is no plain
+    # gk2a_2000m.icechunk in the bucket at all, and the `_test` tier
+    # carries all twelve IR/WV bands.  Discovery still reaches anything
+    # else named gk2a_* if one appears.
+    store_template = "geo/gk2a_{resolution}_test.icechunk"
     # Newer ingests land in separately named stores; consider
     # them when the named one lacks the band or the coverage.
     store_discovery_prefix = "gk2a_"
+    # GK-2A was never materialised into geo/; the virtualized tier is the
+    # only icechunk path it has, and it beats the satpy fallback by ~9x.
+    virtual_satellite = "gk2a_ami"
     scan_interval_minutes = _FULL_DISK_MINUTES
 
     coord_names = {
@@ -151,8 +157,7 @@ class GK2A(GeoStoreReader):
         cache_dir: str | None = None,
         cache_retention: dt.timedelta | None = -1,
     ) -> None:
-        super().__init__(satellite, bands, allow_s3_fallback, cache_dir,
-                         cache_retention)
+        super().__init__(satellite, bands, allow_s3_fallback, cache_dir, cache_retention)
 
     # ------------------------------------------------------------------
     # Public-S3 fallback (native AMI L1b via satpy)
@@ -176,25 +181,29 @@ class GK2A(GeoStoreReader):
     def _s3_data_at_time(self, t: dt.datetime, band: str) -> xr.Dataset:
         """Read the scene from NOAA's public bucket via satpy."""
         slot = self._snap_slot(t)
-        logger.info("Loading %s %s at %s from %s", self.satellite, band,
-                    slot, _S3_BUCKET)
+        logger.info("Loading %s %s at %s from %s", self.satellite, band, slot, _S3_BUCKET)
         keys = self._s3_keys(slot, band)
         if not keys:
             raise FileNotFoundError(
-                f"No AMI L1b file for {self.satellite} {band} at {slot} "
-                f"in s3://{_S3_BUCKET}"
+                f"No AMI L1b file for {self.satellite} {band} at {slot} " f"in s3://{_S3_BUCKET}"
             )
         paths = download_keys(
-            self.fs, keys[:1],
+            self.fs,
+            keys[:1],
             self.cache_dir / self.satellite / f"{slot:%Y%m%d_%H%M}",
         )
         # Decompression scratch goes beside the download cache,
         # not /tmp, and is removed as soon as the scene is read.
         da = load_scene_array(
-            "ami_l1b", paths, band, scratch_dir=self.cache_dir,
+            "ami_l1b",
+            paths,
+            band,
+            scratch_dir=self.cache_dir,
         )
         return scene_to_rad(
-            da, band, sweep=self.sweep,
+            da,
+            band,
+            sweep=self.sweep,
             fallback_sub_lon=self.nominal_sub_lon,
             fallback_height=self.nominal_height,
             label=f"{self.satellite} {band} (S3)",

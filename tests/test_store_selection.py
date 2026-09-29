@@ -38,7 +38,7 @@ class TestCandidateOrder:
         listing[:] = ["himawari_2000m.icechunk", "himawari_2000m_test.icechunk",
                       "himawari_500m.icechunk"]
         order = Himawari(bands=["C14"])._candidate_stores("B14")
-        assert order[0] == "geo/himawari_2000m.icechunk"
+        assert order[0] == "geo/himawari_2000m_test.icechunk"
 
     def test_same_tier_before_other_tiers(self, stub):
         listing, _ = stub
@@ -60,7 +60,7 @@ class TestCandidateOrder:
         listing[:] = ["himawari_2000m_test.icechunk"]
         monkeypatch.setattr(Himawari, "store_discovery_prefix", "")
         assert Himawari(bands=["C14"])._candidate_stores("B14") == [
-            "geo/himawari_2000m.icechunk"]
+            "geo/himawari_2000m_test.icechunk"]
 
 
 class TestSelection:
@@ -128,8 +128,8 @@ class TestSelection:
     def test_tolerance_covers_the_edges(self, stub):
         """A scan one interval past the last one still counts as covered."""
         listing, contents = stub
-        listing[:] = ["himawari_2000m.icechunk"]
-        contents["geo/himawari_2000m.icechunk"] = _contents(
+        listing[:] = ["himawari_2000m_test.icechunk"]
+        contents["geo/himawari_2000m_test.icechunk"] = _contents(
             ["B14"], "2026-01-01", "2026-01-02T00:00")
         reader = Himawari(bands=["C14"])
         assert reader._select_store("B14", dt.datetime(2026, 1, 2, 0, 5))
