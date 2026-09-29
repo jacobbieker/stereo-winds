@@ -931,3 +931,88 @@ class TestSpeedQualityControl:
 
     def test_a_nan_wind_is_still_no_retrieval(self):
         assert np.all(self._flag(np.nan, 0.0) == 0.0)
+
+
+# ── Per-satellite icechunk stores ─────────────────────────────────────
+
+
+class TestSatelliteStores:
+    """Each satellite publishes its own full disk to its own store."""
+
+    def test_uri_is_one_store_per_satellite(self):
+        from stereo_winds.icechunk_output import satellite_store_uri
+
+        assert satellite_store_uri("s3://b/amv", "goes18") == ("s3://b/amv/amv_goes18.icechunk")
+        # Dashes are not valid in the store name the readers expect.
+        assert satellite_store_uri("s3://b/amv", "mtg-i1") == ("s3://b/amv/amv_mtg_i1.icechunk")
+
+    def test_trailing_slash_does_not_double(self):
+        from stereo_winds.icechunk_output import satellite_store_uri
+
+        assert satellite_store_uri("s3://b/amv/", "iodc").count("//") == 1
+
+    def test_each_satellite_gets_its_own_repo(self, tmp_path, stub_infer):
+        pytest.importorskip("icechunk")
+        stores = ring.SatelliteStores(str(tmp_path / "amv"))
+        _run(T0, tmp_path / "out", sat_stores=stores, skip_global=True)
+        written = sorted(p.name for p in (tmp_path / "amv").iterdir())
+        assert written == ["amv_goes18.icechunk", "amv_goes19.icechunk"]
+
+    def test_a_store_holds_the_satellites_own_grid(self, tmp_path, stub_infer):
+        pytest.importorskip("icechunk")
+        import xarray as xr
+
+        stores = ring.SatelliteStores(str(tmp_path / "amv"))
+        _run(T0, tmp_path / "out", sat_stores=stores, skip_global=True)
+        repo = stores.repo("goes18")
+        ds = xr.open_zarr(repo.readonly_session("main").store, consolidated=False)
+        assert set(ds.sizes) == {"time", "y", "x"}
+        assert ds.sizes["time"] == 1
+        # 2-D grid coordinates, written once rather than per scan.
+        assert ds.latitude.dims == ("y", "x")
+        assert ds.attrs["satellite_id"] == "goes18"
+
+    def test_drift_is_recorded_per_scan(self, tmp_path, monkeypatch):
+        """sub_satellite_longitude comes from each scene's own projection
+        metadata and drifts; as a group attribute it would describe every
+        scan in the store by whichever one was written last."""
+        pytest.importorskip("icechunk")
+        import xarray as xr
+
+        drift = {}
+
+        def scene_with_drift(sat_id, t0, *a, **k):
+            ds = _fake_scene(sat_id, t0)
+            # What infer_satellite records from the real scene metadata.
+            lon = -137.0 - 0.001 * len(drift)
+            drift[t0] = lon
+            ds.attrs["sub_satellite_longitude"] = lon
+            return ds
+
+        monkeypatch.setattr(ring, "infer_satellite", scene_with_drift)
+        stores = ring.SatelliteStores(str(tmp_path / "amv"))
+        for t in ring.time_steps(T0, T0 + timedelta(minutes=10), 10):
+            _run(t, tmp_path / "out", sat_stores=stores, skip_global=True, calls_sats=("goes18",))
+        ds = xr.open_zarr(stores.repo("goes18").readonly_session("main").store, consolidated=False)
+        assert ds.sizes["time"] == 2
+        assert ds.sub_satellite_longitude.dims == ("time",)
+        # Two different values, not one repeated.
+        assert len(set(float(v) for v in ds.sub_satellite_longitude.values)) == 2
+
+    def test_a_failed_publish_does_not_cost_the_mosaic(self, tmp_path, stub_infer, monkeypatch):
+        """The disk is already in hand; a store that will not take it is
+        worth reporting, not worth dropping a satellite over."""
+        pytest.importorskip("icechunk")
+
+        def boom(*a, **k):
+            raise RuntimeError("store unavailable")
+
+        monkeypatch.setattr(ring, "write_satellite_to_icechunk", boom)
+        stores = ring.SatelliteStores(str(tmp_path / "amv"))
+        assert _run(T0, tmp_path, sat_stores=stores) is True
+        # The mosaic still got both satellites.
+        assert ring.global_nc_path(tmp_path, T0).exists()
+
+    def test_no_stores_when_not_asked_for(self, tmp_path, stub_infer):
+        _run(T0, tmp_path)
+        assert not (tmp_path / "amv").exists()
