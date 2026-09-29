@@ -108,6 +108,17 @@ class AmvContainerResource(ConfigurableResource):
         description="Container path for scratch; nothing is kept there.",
     )
 
+    gpus: str = Field(
+        default="all",
+        description=(
+            'GPUs to expose to the container: "all", a count, or "none" '
+            "for a CPU run.  The retrieval loads its checkpoints straight "
+            "onto the device it was asked for, so a container started "
+            "without this fails on the first torch.load rather than "
+            "quietly falling back to the CPU."
+        ),
+    )
+
     aws_region: str = Field(default="us-west-2")
 
     # Empty and read from os.environ when the container runs: an EnvVar
@@ -122,6 +133,28 @@ class AmvContainerResource(ConfigurableResource):
         from stereo_winds.icechunk_output import satellite_store_uri
 
         return satellite_store_uri(self.icechunk_base, sat_id)
+
+    def container_kwargs(self) -> dict:
+        """Extra ``docker run`` settings for one retrieval container.
+
+        Only the GPU, and only because nothing else grants it: docker
+        hands a container no devices by default, so ``AMV_DEVICE=cuda``
+        in an otherwise correct container means
+        ``torch.cuda.is_available() is False`` and the run dies loading
+        its first checkpoint.
+
+        Spelled as the plain dict docker's API takes rather than
+        ``docker.types.DeviceRequest`` so that importing this module
+        does not need the docker package on a host that only reads the
+        configuration.
+        """
+        wanted = self.gpus.strip().lower()
+        if not wanted or wanted in ("none", "0"):
+            return {}
+        count = -1 if wanted == "all" else int(wanted)
+        return {
+            "device_requests": [{"Driver": "nvidia", "Count": count, "Capabilities": [["gpu"]]}]
+        }
 
     def credential_env(self) -> dict[str, str]:
         """Credentials for the store, from config or the environment."""

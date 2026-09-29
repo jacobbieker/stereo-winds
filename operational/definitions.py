@@ -46,6 +46,13 @@ Read through :meth:`operational.config.OperationalConfig.from_env`:
     Torch device for inference.  Default ``cpu``.
 ``STEREO_WINDS_OP_ROW_STRIP``
     Rows per forward-pass strip.  Default 1024.
+``STEREO_WINDS_OP_AMV_IMAGE``, ``STEREO_WINDS_OP_AMV_ICECHUNK_BASE``
+    The retrieval image the containerised assets run, and the base the
+    per-satellite icechunk stores hang off.
+``STEREO_WINDS_OP_AMV_GPUS``
+    GPUs to give each retrieval container: ``all`` (default), a count,
+    or ``none``.  The retrieval does not fall back to the CPU, so a
+    container without one fails loading its checkpoints.
 
 Read elsewhere, and listed here because they shape this code location:
 
@@ -279,6 +286,11 @@ def default_resources(
                 env,
             ),
             device=_env_or("STEREO_WINDS_OP_DEVICE", cfg.device, env),
+            gpus=_env_or(
+                "STEREO_WINDS_OP_AMV_GPUS",
+                AmvContainerResource.model_fields["gpus"].default,
+                env,
+            ),
         ),
         "pipes_docker_client": PipesDockerClient(),
     }
