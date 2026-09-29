@@ -107,3 +107,59 @@ class TestRadToBT:
 
         with pytest.raises(ValueError, match="Planck"):
             _rad_to_bt(np.ones((2, 2), np.float32), {})
+
+
+class TestVirtualFallback:
+    """When the public bucket has no file, the virtualized tier answers.
+
+    That gap is real: a week-long sweep of the ring lost GOES-18 and
+    GOES-19 for a whole day to `No ABI file on S3`.
+    """
+
+    T = dt.datetime(2026, 9, 1, 6, 0)
+
+    @staticmethod
+    def _missing(reader):
+        def _boom(t, band):
+            raise FileNotFoundError("No ABI file on S3: (simulated)")
+
+        reader._find_key = _boom
+        return reader
+
+    def test_s3_error_survives_when_no_virtual_store_exists(self, monkeypatch):
+        """The useful message is 'no file on S3', so it must not be
+        replaced by whatever the fallback failed with."""
+        from stereo_winds.readers import _virtual_store as virtual
+
+        monkeypatch.setattr(virtual, "virtual_store_for", lambda *a, **k: [])
+        g = self._missing(GOES(satellite="goes19", bands=["C14"]))
+        with pytest.raises(FileNotFoundError, match="No ABI file on S3"):
+            g.data_at_time(self.T)
+
+    def test_unreachable_virtual_tier_does_not_mask_the_s3_error(self, monkeypatch):
+        from stereo_winds.readers import _virtual_store as virtual
+
+        def _explode(*a, **k):
+            raise OSError("source.coop unreachable")
+
+        monkeypatch.setattr(virtual, "virtual_store_for", _explode)
+        g = self._missing(GOES(satellite="goes19", bands=["C14"]))
+        with pytest.raises(FileNotFoundError, match="No ABI file on S3"):
+            g.data_at_time(self.T)
+
+    def test_a_scan_outside_the_tolerance_is_refused(self, monkeypatch):
+        """A neighbouring scan is not a substitute: the retrieval takes
+        the interval between frames as its baseline."""
+        import numpy as np
+        import xarray as xr
+
+        from stereo_winds.readers import _virtual_store as virtual
+
+        far = np.array(["2026-09-01T09:00"], dtype="datetime64[ns]")
+        store = xr.Dataset(coords={"t": far})
+        monkeypatch.setattr(virtual, "virtual_store_for", lambda *a, **k: ["geo/virtualized/x"])
+        monkeypatch.setattr(virtual, "open_virtual_dataset", lambda *a, **k: store)
+        monkeypatch.setattr(virtual, "_scan_start", lambda ds: far)
+        g = self._missing(GOES(satellite="goes19", bands=["C14"]))
+        with pytest.raises(FileNotFoundError, match="No ABI file on S3"):
+            g.data_at_time(self.T)
