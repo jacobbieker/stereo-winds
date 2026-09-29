@@ -30,6 +30,7 @@ from dagster import (
 )
 
 from operational.assets.amv_assets import amv_asset_name
+from operational.assets.amv_container_assets import amv_container_asset_name
 from operational.assets.consumer_assets import consumer_asset_name
 from operational.satellite_consumer import CONSUMER_SATELLITES
 from operational.config import OperationalConfig
@@ -89,6 +90,13 @@ EXPECTED_ASSET_KEYS = {
 #: external service on each satellite's own cadence.
 EXPECTED_INGEST_KEYS = {AssetKey(consumer_asset_name(key)) for key in CONSUMER_SATELLITES}
 
+#: The containerised retrieval: the *other* way of doing what the
+#: in-process AMV assets do, so the full job excludes it rather than
+#: retrieving every satellite twice from two directions.
+EXPECTED_CONTAINER_KEYS = {
+    AssetKey(amv_container_asset_name(sat_id)) for sat_id in DEFAULT_SATELLITES
+}
+
 #: The cadence the asset modules were imported at.
 BUILT_CADENCE_MINUTES = OperationalConfig.from_env().cadence_minutes
 
@@ -140,7 +148,7 @@ class TestDefinitionsLoad:
 
     def test_expected_asset_keys_are_present(self):
         assert set(defs.resolve_asset_graph().get_all_asset_keys()) == (
-            EXPECTED_ASSET_KEYS | EXPECTED_INGEST_KEYS
+            EXPECTED_ASSET_KEYS | EXPECTED_INGEST_KEYS | EXPECTED_CONTAINER_KEYS
         )
 
     def test_every_asset_is_partitioned_the_same_way(self):
@@ -186,6 +194,9 @@ class TestFullJob:
         # deployment without a Docker daemon running the retrieval.
         assert _selected_keys(job_def) == EXPECTED_ASSET_KEYS
         assert not (_selected_keys(job_def) & EXPECTED_INGEST_KEYS)
+        # Both retrieval paths in one job would write every partition
+        # twice, from two directions.
+        assert not (_selected_keys(job_def) & EXPECTED_CONTAINER_KEYS)
 
     def test_is_partitioned(self):
         job_def = defs.resolve_job_def(FULL_JOB_NAME)
@@ -519,6 +530,7 @@ class TestResources:
             "run_settings",
             "satellite_consumer",
             "pipes_docker_client",
+            "amv_container",
         }
 
     def test_defaults_construct_without_any_files(self, tmp_path):
@@ -537,6 +549,7 @@ class TestResources:
             "run_settings",
             "satellite_consumer",
             "pipes_docker_client",
+            "amv_container",
         }
         # Nothing was created on the way.
         assert not missing.exists()
@@ -859,7 +872,7 @@ class TestMaterializeOnePartition:
         retrieval = [
             asset_def
             for asset_def in defs.assets
-            if not (set(asset_def.keys) & EXPECTED_INGEST_KEYS)
+            if not (set(asset_def.keys) & (EXPECTED_INGEST_KEYS | EXPECTED_CONTAINER_KEYS))
         ]
         result = materialize(
             retrieval,
