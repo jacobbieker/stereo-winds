@@ -89,23 +89,35 @@ class TestExecution:
         assert env["AWS_SECRET_ACCESS_KEY"] == "aws-secret"
         assert result.metadata["satellite"].text == "odegree-12"
 
-    def test_window_is_the_satellites_own_cycle(self, resource):
+    def test_window_is_three_of_the_satellites_own_cycles(self, resource):
         """A 15 minute partition must not ask a 10 minute instrument for
         a cycle that does not exist, or the reverse."""
         result, _ = self._run("odegree-12", resource, "2026-09-20-00:00")
         start = dt.datetime.fromisoformat(result.metadata["window_start"].text)
         end = dt.datetime.fromisoformat(result.metadata["window_end"].text)
-        assert end - start == dt.timedelta(minutes=10)  # FCI
+        assert end - start == dt.timedelta(minutes=30)  # FCI, 3 x 10
 
         result, _ = self._run("iodc", resource, "2026-09-20-00:00")
         start = dt.datetime.fromisoformat(result.metadata["window_start"].text)
         end = dt.datetime.fromisoformat(result.metadata["window_end"].text)
-        assert end - start == dt.timedelta(minutes=15)  # SEVIRI
+        assert end - start == dt.timedelta(minutes=45)  # SEVIRI, 3 x 15
+
+    def test_window_covers_the_frame_either_side_of_the_partition(self, resource):
+        """The retrieval reads t0 - delta, t0 and t0 + delta, so a window
+        holding only the t0 cycle leaves it two frames short."""
+        result, _ = self._run("odegree-12", resource, "2026-09-20-06:00")
+        start = dt.datetime.fromisoformat(result.metadata["window_start"].text)
+        end = dt.datetime.fromisoformat(result.metadata["window_end"].text)
+        t0 = dt.datetime(2026, 9, 20, 6, 0)
+        delta = dt.timedelta(minutes=10)
+        assert start <= t0 - delta
+        # End is exclusive, so the t0 + delta cycle has to sit inside it.
+        assert end > t0 + delta
 
     def test_runs_the_configured_image(self, resource):
         _, client = self._run("iodc", resource, "2026-09-20-00:00")
         assert client.run.call_args.kwargs["image"] == resource.image
 
-    def test_window_start_follows_the_partition(self, resource):
+    def test_window_starts_one_cycle_before_the_partition(self, resource):
         result, _ = self._run("iodc", resource, "2026-09-20-06:15")
-        assert result.metadata["window_start"].text.startswith("2026-09-20T06:15")
+        assert result.metadata["window_start"].text.startswith("2026-09-20T06:00")
