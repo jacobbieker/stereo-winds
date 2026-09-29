@@ -86,3 +86,53 @@ class TestScanAngles:
     def test_zero_scaling_is_not_divided_by(self):
         attrs = dict(self.ATTRS, cfac=0.0)
         assert _scan_angles(xr.Dataset(attrs=attrs), 10, 10) is None
+
+
+class TestScanStartReindexing:
+    """The `_test` ingests label each scan by when it ended."""
+
+    @staticmethod
+    def _reader(interval):
+        from stereo_winds.readers._geos_store import GeoStoreReader
+
+        reader = GeoStoreReader.__new__(GeoStoreReader)
+        reader.scan_interval_minutes = interval
+        return reader
+
+    @staticmethod
+    def _store(labels, ends):
+        return xr.Dataset(
+            {
+                "observation_end_time": ("time", np.array(ends, dtype="datetime64[ns]")),
+                "B14": ("time", np.zeros(len(labels))),
+            },
+            coords={"time": np.array(labels, dtype="datetime64[ns]")},
+        )
+
+    def test_end_labelled_store_is_moved_to_the_start(self):
+        """himawari_2000m_test: a scan ending 05:59:41 began at 05:50."""
+        ds = self._store(["2026-09-01T06:00"], ["2026-09-01T05:59:41"])
+        out = self._reader(10)._index_by_scan_start(ds, "himawari_2000m_test")
+        assert out["time"].values[0] == np.datetime64("2026-09-01T05:50")
+
+    def test_fifteen_minute_cycle(self):
+        """iodc_3000m_test: a scan ending 05:57:38 began at 05:45."""
+        ds = self._store(["2026-09-01T06:00"], ["2026-09-01T05:57:38"])
+        out = self._reader(15)._index_by_scan_start(ds, "iodc_3000m_test")
+        assert out["time"].values[0] == np.datetime64("2026-09-01T05:45")
+
+    def test_a_start_labelled_store_is_left_alone(self):
+        """Flooring the recorded end, not subtracting a constant, is what
+        makes this a no-op once the ingest is corrected upstream."""
+        ds = self._store(["2026-09-01T05:50"], ["2026-09-01T05:59:41"])
+        out = self._reader(10)._index_by_scan_start(ds, "already_correct")
+        assert out["time"].values[0] == np.datetime64("2026-09-01T05:50")
+
+    def test_store_without_the_variable_is_untouched(self):
+        ds = xr.Dataset(
+            {"B14": ("time", np.zeros(2))},
+            coords={"time": np.array(["2026-09-01T06:00", "2026-09-01T06:10"],
+                                     dtype="datetime64[ns]")},
+        )
+        out = self._reader(10)._index_by_scan_start(ds, "plain")
+        assert out["time"].values[0] == np.datetime64("2026-09-01T06:00")

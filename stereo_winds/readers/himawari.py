@@ -109,7 +109,11 @@ class Himawari(GeoStoreReader):
     band_name_hint = "Use AHI names (B01-B16) or ABI names (C01-C16)."
     default_band = "B14"
 
-    store_template = "geo/himawari_{resolution}.icechunk"
+    # The `_test` stores are the current ingest and the plain ones are
+    # not: himawari_2000m_test carries twelve bands to 2026-09, where
+    # himawari_1000m stops in 2025-01.  Discovery still falls back to
+    # the older stores for a band or a time the current one lacks.
+    store_template = "geo/himawari_{resolution}_test.icechunk"
     # Newer ingests land in separately named stores; consider
     # them when the named one lacks the band or the coverage.
     store_discovery_prefix = "himawari_"

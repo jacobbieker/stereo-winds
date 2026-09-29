@@ -71,8 +71,8 @@ class TestConstructor:
 
     def test_store_prefix(self):
         h = Himawari()
-        assert h._store_prefix("2000m") == "geo/himawari_2000m.icechunk"
-        assert h._store_prefix("500m") == "geo/himawari_500m.icechunk"
+        assert h._store_prefix("2000m") == "geo/himawari_2000m_test.icechunk"
+        assert h._store_prefix("500m") == "geo/himawari_500m_test.icechunk"
 
     def test_repr(self):
         h = Himawari(satellite="himawari9", bands=["B14"])

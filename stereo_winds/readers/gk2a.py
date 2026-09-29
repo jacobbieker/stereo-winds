@@ -127,7 +127,11 @@ class GK2A(GeoStoreReader):
     band_name_hint = "Use AMI names (VI004-IR133) or ABI names (C01-C16)."
     default_band = "IR112"
 
-    store_template = "geo/gk2a_{resolution}.icechunk"
+    # The `_test` stores are the live ones: there is no plain
+    # gk2a_2000m.icechunk in the bucket at all, and the `_test` tier
+    # carries all twelve IR/WV bands.  Discovery still reaches anything
+    # else named gk2a_* if one appears.
+    store_template = "geo/gk2a_{resolution}_test.icechunk"
     # Newer ingests land in separately named stores; consider
     # them when the named one lacks the band or the coverage.
     store_discovery_prefix = "gk2a_"

@@ -380,6 +380,7 @@ class GeoStoreReader:
                 return cached
             logger.info("Opening icechunk store %s/%s", self.bucket, prefix)
             ds = self._open_as_dataset(prefix)
+            ds = self._index_by_scan_start(ds, prefix)
             if "time" in ds.dims:
                 # Drop duplicate timestamps, then sort for nearest-neighbour
                 # lookup.
@@ -387,6 +388,61 @@ class GeoStoreReader:
                 ds = ds.isel(time=np.sort(unique_idx)).sortby("time")
             _OPEN_DATASETS[key] = ds
             return ds
+
+    def _index_by_scan_start(self, ds: xr.Dataset, prefix: str) -> xr.Dataset:
+        """Re-index a store that labels its scans by when they *ended*.
+
+        The ``_test`` ingests label each record by the end of the
+        observation -- ``gk2a_2000m_test`` by the end timestamp itself,
+        ``himawari_2000m_test`` and ``iodc_3000m_test`` by the slot that
+        end falls in.  satpy, the public-S3 fallback and the GOES reader
+        all label by the *start*.  Left alone, a request for 06:00 hands
+        back the scan that ran 05:50-06:00, so every satellite on one of
+        these stores sits a full cycle behind the ones that are not --
+        inside a mosaic that claims a single valid time.
+
+        The start is recovered from ``observation_end_time``, which the
+        stores carry, floored to the instrument's repeat cycle: a scan
+        ending 05:59:41 on a 10 minute cycle began at 05:50, and one
+        ending 05:57:38 on a 15 minute cycle began at 05:45.  Flooring
+        the recorded end rather than subtracting a fixed offset means a
+        store that already labels by start is left exactly as it is, so
+        this becomes a no-op if the ingest is corrected upstream.
+        """
+        if "observation_end_time" not in ds.data_vars or "time" not in ds.dims:
+            return ds
+        try:
+            ends = np.asarray(ds["observation_end_time"].values, "datetime64[ns]").reshape(
+                ds.sizes["time"], -1
+            )[:, 0]
+        except Exception:
+            logger.warning(
+                "%s carries observation_end_time but it could not be read; "
+                "leaving the time axis as the store labelled it",
+                prefix,
+                exc_info=True,
+            )
+            return ds
+
+        cycle = np.timedelta64(int(self.scan_interval_minutes) * 60, "s").astype("timedelta64[ns]")
+        epoch = np.datetime64(0, "ns")
+        starts = epoch + ((ends - epoch) // cycle) * cycle
+
+        labelled = np.asarray(ds["time"].values, "datetime64[ns]")
+        shift = starts - labelled
+        moved = int(np.count_nonzero(shift != np.timedelta64(0, "ns")))
+        if not moved:
+            return ds
+        median = np.median(shift.astype("timedelta64[s]").astype(np.int64)) / 60.0
+        logger.info(
+            "%s labels scans by their end; re-indexing %d of %d records to "
+            "the scan start (median %+.0f min)",
+            prefix,
+            moved,
+            len(labelled),
+            median,
+        )
+        return ds.assign_coords(time=("time", starts))
 
     def _open_as_dataset(self, prefix: str) -> xr.Dataset:
         """Open ``prefix``, normalising it if it is a virtualized store.
