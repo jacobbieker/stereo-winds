@@ -395,3 +395,92 @@ class TestEndToEnd:
         assert ds.attrs["satellites"] == "goes19"
         assert int(ds["quality_degraded"].values[0]) == 1
         assert str(ds["satellites_contributing"].values[0]) == "goes19"
+
+
+class TestLoadFromStores:
+    """The mosaic can read per-satellite retrievals out of S3 icechunk.
+
+    This is what lets the satellites be retrieved on other hosts: the
+    filesystem loader only works when every one of them ran here.
+    """
+
+    @staticmethod
+    def _publish(base, sat_id, t0, ny=8, nx=8):
+        import numpy as np
+        import xarray as xr
+        from stereo_winds.icechunk_output import (
+            open_icechunk_repo,
+            satellite_store_uri,
+            write_satellite_to_icechunk,
+        )
+
+        lat, lon = np.meshgrid(np.linspace(-20, 20, ny), np.linspace(-30, 30, nx), indexing="ij")
+        ds = xr.Dataset(
+            {
+                k: (("y", "x"), np.full((ny, nx), 1.0, np.float32))
+                for k in (
+                    "u_wind",
+                    "v_wind",
+                    "cloud_top_height",
+                    "quality_flag",
+                    "sigma_u",
+                    "sigma_v",
+                    "sigma_h",
+                )
+            },
+            coords={
+                "latitude": (("y", "x"), lat.astype(np.float32)),
+                "longitude": (("y", "x"), lon.astype(np.float32)),
+                "zenith_angle": (("y", "x"), np.full((ny, nx), 10.0, np.float32)),
+            },
+            attrs={"satellite_id": sat_id, "source": "student_amv"},
+        )
+        repo = open_icechunk_repo(satellite_store_uri(base, sat_id))
+        write_satellite_to_icechunk(repo, ds, t0)
+
+    def test_reads_what_each_satellite_published(self, tmp_path):
+        pytest.importorskip("icechunk")
+        from operational.assets.mosaic_assets import load_retrievals_from_stores
+
+        base = str(tmp_path / "amv")
+        t0 = datetime(2026, 9, 20, 12, 0)
+        self._publish(base, "goes18", t0)
+        self._publish(base, "goes19", t0)
+
+        got = load_retrievals_from_stores(base, ["goes18", "goes19"], t0)
+        assert set(got) == {"goes18", "goes19"}
+        # Shaped as the mosaic expects from a NetCDF: (y, x), no time.
+        assert got["goes18"]["u_wind"].dims == ("y", "x")
+
+    def test_a_satellite_that_has_not_landed_is_skipped(self, tmp_path):
+        """A mosaic of the satellites that made it beats no mosaic."""
+        pytest.importorskip("icechunk")
+        from operational.assets.mosaic_assets import load_retrievals_from_stores
+
+        base = str(tmp_path / "amv")
+        t0 = datetime(2026, 9, 20, 12, 0)
+        self._publish(base, "goes18", t0)
+
+        got = load_retrievals_from_stores(base, ["goes18", "goes19"], t0)
+        assert set(got) == {"goes18"}
+
+    def test_a_timestamp_not_yet_published_is_skipped(self, tmp_path):
+        pytest.importorskip("icechunk")
+        from operational.assets.mosaic_assets import load_retrievals_from_stores
+
+        base = str(tmp_path / "amv")
+        self._publish(base, "goes18", datetime(2026, 9, 20, 12, 0))
+
+        got = load_retrievals_from_stores(base, ["goes18"], datetime(2026, 9, 20, 18, 0))
+        assert got == {}
+
+    def test_no_stores_at_all_is_empty_not_an_error(self, tmp_path):
+        pytest.importorskip("icechunk")
+        from operational.assets.mosaic_assets import load_retrievals_from_stores
+
+        assert (
+            load_retrievals_from_stores(
+                str(tmp_path / "nothing"), ["goes18"], datetime(2026, 9, 20, 12, 0)
+            )
+            == {}
+        )

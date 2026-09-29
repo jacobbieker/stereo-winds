@@ -255,6 +255,7 @@ def default_resources(
             cadence_minutes=cfg.cadence_minutes,
             availability_tolerance_minutes=cfg.availability_tolerance_minutes,
             resolution_m=cfg.resolution_m,
+            amv_icechunk_base=_env_or("STEREO_WINDS_OP_AMV_ICECHUNK_BASE", "", env),
         ),
         "satellite_consumer": SatelliteConsumerResource(
             image=_env_or(
