@@ -97,7 +97,11 @@ CONSUMER_SATELLITES: dict[str, ConsumerSatellite] = {
     "iodc": ConsumerSatellite(
         key="iodc",
         ring_id="msg-iodc",
-        store="geo/iodc_3000m.icechunk",
+        # The `_test` store, because that is the one the reader reads.
+        # The plain iodc_3000m is a stalled ingest whose time axis no
+        # longer decodes, and writing there filled a store nothing
+        # would have read.
+        store="geo/iodc_3000m_test.icechunk",
         resolution_m=3000,
         cadence_mins=15,
         description="MSG SEVIRI Indian Ocean, 45.5 degrees East",

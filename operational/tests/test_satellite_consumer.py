@@ -115,7 +115,7 @@ class TestWindowEnv:
             aws_secret_access_key="b",
         )
         assert r.store_url(consumer_satellite("iodc")) == (
-            "s3://bucket/prefix/geo/iodc_3000m.icechunk"
+            "s3://bucket/prefix/geo/iodc_3000m_test.icechunk"
         )
 
 
@@ -184,3 +184,33 @@ class TestCredentialResolution:
         # an expensive way to discover them one at a time.
         for var in ("EUMETSAT_CONSUMER_KEY", "AWS_SECRET_ACCESS_KEY"):
             assert var in message
+
+
+class TestWriteTargetsMatchReadTargets:
+    """A consumer that fills a store no reader reads is a silent no-op.
+
+    IODC was exactly that: the consumer wrote geo/iodc_3000m.icechunk
+    while the ring read geo/iodc_3000m_test.icechunk, so a successful
+    ingest would still have left the retrieval with nothing.
+    """
+
+    @staticmethod
+    def _read_target(ring_id: str) -> str:
+        from stereo_winds.readers.msg import MSG
+        from stereo_winds.readers.mtg import MTG
+
+        if ring_id in (MSG.store_prefixes or {}):
+            return MSG.store_prefixes[ring_id]
+        if ring_id == "mtg-i1":
+            return MTG.store_template.format(resolution="2000m")
+        raise AssertionError(f"no reader mapping known for {ring_id}")
+
+    def test_every_satellite_writes_where_the_ring_reads(self):
+        from operational.satellite_consumer import CONSUMER_SATELLITES
+
+        wrong = {
+            key: (sat.store, self._read_target(sat.ring_id))
+            for key, sat in CONSUMER_SATELLITES.items()
+            if sat.ring_id and sat.store != self._read_target(sat.ring_id)
+        }
+        assert not wrong, f"consumer writes where the ring does not read: {wrong}"
