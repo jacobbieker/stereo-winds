@@ -148,21 +148,36 @@ def virtual_store_for(
     endpoint: str,
     satellite: str,
     band: str,
+    when: "dt.datetime | None" = None,
 ) -> list[str]:
     """Prefixes of the stores holding ``band`` for ``satellite``.
 
     Newest cutoff first, because the newest is the one most likely to
     cover a recent request; the caller still checks real coverage, since
     the cutoff in the name is not the coverage end.
+
+    ``when`` drops the stores that cannot hold that instant: a store
+    cut at 2024-12-31 has nothing from 2026, and opening it to find
+    that out is not free.  Each open reads a time axis of tens of
+    thousands of entries and is cached for the life of the process, so
+    a timestamp past *every* store -- which is what a satellite looks
+    like once its archive ends -- otherwise opens the whole stack, for
+    every band, and keeps them all.  That is what wedged a sweep at the
+    end of GK-2A's coverage: resident memory reached 57 GB and three
+    restarts made no progress.
     """
     wanted_sat = satellite.lower()
     wanted_band = band.lower()
+    cutoff_floor = when.strftime("%Y-%m-%d") if when is not None else None
     hits = []
     for name in list_virtual_stores(bucket, endpoint):
         parsed = parse_store_name(name)
         if parsed is None:
             continue
         if parsed.satellite.lower() != wanted_sat or parsed.band.lower() != wanted_band:
+            continue
+        # An undated store is the rolling one and is never ruled out.
+        if cutoff_floor is not None and parsed.cutoff is not None and parsed.cutoff < cutoff_floor:
             continue
         hits.append((parsed.cutoff or _NO_CUTOFF, f"{VIRTUAL_ROOT}/{name}"))
     return [prefix for _, prefix in sorted(hits, reverse=True)]
