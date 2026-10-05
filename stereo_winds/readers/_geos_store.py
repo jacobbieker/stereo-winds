@@ -276,7 +276,7 @@ class GeoStoreReader:
                 f"{self.satellite!r}; known: {', '.join(sorted(prefix))}"
             ) from None
 
-    def _candidate_stores(self, band: str) -> list[str]:
+    def _candidate_stores(self, band: str, when: dt.datetime | None = None) -> list[str]:
         """Stores that might hold ``band``, most likely first.
 
         The band's resolution tier is a hint, not the answer: bands move
@@ -298,10 +298,15 @@ class GeoStoreReader:
         # Same tier first (a newer ingest of the same grid), then the rest.
         same_tier = [p for p in others if tier in p and p != preferred]
         rest = [p for p in others if tier not in p and p != preferred]
-        return [preferred, *same_tier, *rest, *self._virtual_candidates(band)]
+        return [preferred, *same_tier, *rest, *self._virtual_candidates(band, when)]
 
-    def _virtual_candidates(self, band: str) -> list[str]:
-        """Virtualized stores for ``band``, or none if the tier is off."""
+    def _virtual_candidates(self, band: str, when: dt.datetime | None = None) -> list[str]:
+        """Virtualized stores for ``band``, or none if the tier is off.
+
+        ``when`` is passed on so the stores cut before it are dropped
+        without being opened; see virtual_store_for for why that
+        matters at the end of a satellite's archive.
+        """
         name = self.virtual_satellite
         if isinstance(name, dict):
             name = name.get(self.satellite)
@@ -309,7 +314,7 @@ class GeoStoreReader:
             return []
         from stereo_winds.readers._virtual_store import virtual_store_for
 
-        return virtual_store_for(self.bucket, self.endpoint, name, band)
+        return virtual_store_for(self.bucket, self.endpoint, name, band, when)
 
     def _store_contents(self, prefix: str):
         """(bands, first scan, last scan) for a store, or None if unusable."""
@@ -337,7 +342,7 @@ class GeoStoreReader:
         target = np.datetime64(t.replace(tzinfo=None), "ns")
         tolerance = np.timedelta64(int(self.store_tolerance.total_seconds()), "s")
         tried: list[str] = []
-        for prefix in self._candidate_stores(band):
+        for prefix in self._candidate_stores(band, t):
             contents = self._store_contents(prefix)
             if contents is None:
                 continue

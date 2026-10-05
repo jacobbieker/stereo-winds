@@ -136,3 +136,51 @@ class TestScanStartReindexing:
         )
         out = self._reader(10)._index_by_scan_start(ds, "plain")
         assert out["time"].values[0] == np.datetime64("2026-09-01T06:00")
+
+
+class TestCutoffPruning:
+    """A store cut before the requested instant cannot hold it.
+
+    Opening it to find that out costs a time-axis read of tens of
+    thousands of entries, cached for the life of the process.  Past the
+    end of a satellite's archive *every* store misses, so without this
+    the whole stack is opened for every band and kept -- which wedged a
+    sweep at 57 GB resident with three restarts and no progress.
+    """
+
+    NAMES = [
+        "gk2a_ami_fd_ir133.icechunk",
+        "gk2a_ami_fd_ir133_2025-12-31.icechunk",
+        "gk2a_ami_fd_ir133_2024-12-31.icechunk",
+        "gk2a_ami_fd_ir133_2023-12-31.icechunk",
+    ]
+
+    def _for(self, monkeypatch, when):
+        from stereo_winds.readers import _virtual_store as virtual
+
+        monkeypatch.setattr(virtual, "list_virtual_stores", lambda *a, **k: self.NAMES)
+        return [
+            p.rsplit("/", 1)[-1]
+            for p in virtual.virtual_store_for("b", "e", "gk2a_ami", "ir133", when)
+        ]
+
+    def test_stale_tiers_are_dropped(self, monkeypatch):
+        import datetime as dt
+
+        got = self._for(monkeypatch, dt.datetime(2026, 9, 27, 22, 30))
+        assert got == ["gk2a_ami_fd_ir133.icechunk"]
+
+    def test_a_historical_request_still_reaches_its_tier(self, monkeypatch):
+        import datetime as dt
+
+        got = self._for(monkeypatch, dt.datetime(2024, 6, 1))
+        assert "gk2a_ami_fd_ir133_2024-12-31.icechunk" in got
+        assert "gk2a_ami_fd_ir133_2023-12-31.icechunk" not in got
+
+    def test_without_a_time_nothing_is_pruned(self, monkeypatch):
+        assert len(self._for(monkeypatch, None)) == len(self.NAMES)
+
+    def test_the_undated_store_is_never_ruled_out(self, monkeypatch):
+        import datetime as dt
+
+        assert "gk2a_ami_fd_ir133.icechunk" in self._for(monkeypatch, dt.datetime(2023, 1, 1))
