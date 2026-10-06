@@ -1,7 +1,9 @@
-"""Minimal public-S3 GOES ABI L1b reader (no satpy, no auth).
+"""Minimal GOES ABI L1b reader (no satpy, no auth).
 
-Reads GOES-16/17/18/19 ABI Level-1b radiance from NOAA's public S3 buckets
-(``noaa-goes16`` ...) and returns a dataset shaped exactly like the internal
+Reads GOES-16/17/18/19 ABI Level-1b radiance from the virtualized icechunk
+stores on source.coop (``geo/virtualized/goes19_radf_C13.icechunk`` ...,
+whose chunks reference the L1b objects in NOAA's buckets), falling back to
+NOAA's public S3 buckets (``noaa-goes16`` ...) themselves, and returns a dataset shaped exactly like the internal
 satpy-based reader stereo-winds was built against: ``Rad`` as ``(time, band,
 y, x)`` oriented south->north, ``x``/``y`` in **meters** (scan angle x
 perspective height), and ``Rad.attrs["orbital_parameters"]`` carrying
@@ -18,6 +20,8 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -71,6 +75,78 @@ def _abi_to_satpy_like(raw: xr.Dataset) -> xr.Dataset:
     ds = xr.Dataset({"Rad": Rad})
     ds.attrs["sweep_angle_axis"] = proj.get("sweep_angle_axis", "x")
     return ds
+
+
+#: Reader product -> the ``<product>`` field of a virtualized store name.
+_VIRTUAL_PRODUCT = {"ABI-L1b-RadF": "radf", "ABI-L1b-RadC": "radc", "ABI-L1b-RadM": "radm"}
+
+# Opened virtualized stores, keyed by prefix: (dataset, scan starts,
+# when opened).  Opening one reads a time axis of ~10^4 entries (a few
+# seconds cold), and a scene reads several bands from several frames, so
+# without this every band of every frame would pay it again.  Shared
+# across readers and threads, as _geos_store._OPEN_DATASETS is.
+_VIRTUAL_OPEN: dict[str, tuple[xr.Dataset, np.ndarray, float]] = {}
+_VIRTUAL_LOCK = threading.Lock()
+_VIRTUAL_PREFIX_LOCKS: dict[str, threading.Lock] = {}
+
+#: The undated stores are still appended to.  A cached handle older than
+#: this is reopened when asked for a time past its last scan, so a
+#: long-running process picks up new scans rather than falling back to S3
+#: for them forever.
+VIRTUAL_REFRESH_SECONDS = 600.0
+
+
+def _iso_utc(value) -> str:
+    """``2026-09-15T12:00:21.800Z``: the form the L1b files carry."""
+    return str(np.datetime_as_string(np.datetime64(value, "ms"), unit="ms")) + "Z"
+
+
+def clear_virtual_cache() -> None:
+    """Drop cached virtualized-store handles (tests, or to force a reopen)."""
+    with _VIRTUAL_LOCK:
+        _VIRTUAL_OPEN.clear()
+
+
+def _open_virtual(
+    prefix: str, target: np.datetime64, tolerance: np.timedelta64
+) -> tuple[xr.Dataset, np.ndarray]:
+    """The store at ``prefix`` and its scan start times, cached.
+
+    Reopened only when the cached copy is stale *and* ``target`` lies
+    past its last scan -- the one case a newer snapshot could change the
+    answer.
+    """
+    from stereo_winds.readers._geos_store import GeoStoreReader
+    from stereo_winds.readers import _virtual_store as virtual
+
+    def _usable(cached):
+        if cached is None:
+            return False
+        _, starts, opened = cached
+        stale = time.monotonic() - opened > VIRTUAL_REFRESH_SECONDS
+        beyond = starts.size == 0 or target > starts.max() + tolerance
+        return not (stale and beyond)
+
+    with _VIRTUAL_LOCK:
+        cached = _VIRTUAL_OPEN.get(prefix)
+        if _usable(cached):
+            return cached[0], cached[1]
+        # One lock per store: an open is a network round trip of
+        # seconds, and holding the shared lock across it would queue
+        # every other band and satellite -- and a hung source.coop would
+        # hold up the S3 fallback for all of them.
+        prefix_lock = _VIRTUAL_PREFIX_LOCKS.setdefault(prefix, threading.Lock())
+    with prefix_lock:
+        with _VIRTUAL_LOCK:
+            cached = _VIRTUAL_OPEN.get(prefix)
+        if _usable(cached):
+            return cached[0], cached[1]
+        logger.info("Opening virtualized store %s", prefix)
+        ds = virtual.open_virtual_dataset(GeoStoreReader.bucket, GeoStoreReader.endpoint, prefix)
+        starts = np.asarray(virtual._scan_start(ds), dtype="datetime64[ns]")
+        with _VIRTUAL_LOCK:
+            _VIRTUAL_OPEN[prefix] = (ds, starts, time.monotonic())
+        return ds, starts
 
 
 class GOES:
@@ -132,21 +208,36 @@ class GOES:
     def data_at_time(self, t: dt.datetime, download: bool = True, **_) -> xr.Dataset:
         """Return the ABI scene at (snapped) time ``t`` for ``self.bands[0]``.
 
-        Falls back to the virtualized icechunk tier when the public
-        bucket has no file for the slot.  That gap is real and recurring
-        -- a sweep over a week of the ring lost GOES-18 and GOES-19 for a
-        whole day to ``No ABI file on S3`` -- and the virtualized stores
-        reference the same objects, so what comes back is the same
-        scene, not a substitute.
+        The virtualized icechunk tier is asked first and the public
+        bucket second.  The virtualized stores reference the same L1b
+        objects in the NOAA bucket, so what comes back is the same scene
+        either way; the tier only saves the bucket listing and the
+        NetCDF download.  Once a store's time axis has been read (it is
+        cached per process, see :func:`_open_virtual`) a band costs a few
+        ranged reads.
+
+        Anything the virtualized tier cannot serve -- no store for the
+        band, a time outside its coverage, source.coop unreachable, a
+        store that fails to open -- falls through to the S3 path, whose
+        "No ABI file on S3" is the error raised when neither has it.
         """
         band = self.bands[0]
         try:
-            key = self._find_key(t, band)
-        except FileNotFoundError:
             scene = self._virtual_scene(t, band)
-            if scene is None:
-                raise
+        except Exception:
+            logger.info(
+                "virtualized tier failed for %s %s at %s; trying S3",
+                self.satellite,
+                band,
+                t,
+                exc_info=True,
+            )
+            scene = None
+        if scene is not None:
             return scene
+
+        key = self._find_key(t, band)
+        logger.info("%s %s at %s: read from S3 %s", self.satellite, band, t, key)
         if download:
             local = self.cache_dir / self.satellite / Path(key).name
             local.parent.mkdir(parents=True, exist_ok=True)
@@ -161,38 +252,58 @@ class GOES:
         finally:
             raw.close()
 
-    def _virtual_scene(self, t: dt.datetime, band: str) -> xr.Dataset | None:
-        """The scene from the virtualized tier, or None if it has none.
+    def _virtual_prefixes(self, band: str, when: dt.datetime | None) -> list[str]:
+        """Virtualized stores for this satellite, product and band.
 
-        Returns None rather than raising so the caller re-raises the
-        original S3 error: "no file on S3" is the useful message when
-        neither source has the scan, and a failure to reach source.coop
-        should not mask it.
+        Newest first, with the undated (still appended) store ahead of
+        the dated snapshots; stores cut before ``when`` are left out.
+        Only stores of this reader's product: a CONUS request must not
+        be answered from a full-disk store whose scan happens to start
+        within the tolerance.
         """
         from stereo_winds.readers._geos_store import GeoStoreReader
         from stereo_winds.readers import _virtual_store as virtual
 
+        wanted = _VIRTUAL_PRODUCT.get(self.product)
+        if wanted is None:
+            return []
+        prefixes = virtual.virtual_store_for(
+            GeoStoreReader.bucket, GeoStoreReader.endpoint, self.satellite, band, when=when
+        )
+        out = []
+        for prefix in prefixes:
+            parsed = virtual.parse_store_name(prefix.rsplit("/", 1)[-1])
+            if parsed is not None and parsed.product.lower() == wanted:
+                out.append(prefix)
+        return out
+
+    def _virtual_scene(self, t: dt.datetime, band: str) -> xr.Dataset | None:
+        """The scene from the virtualized tier, or None if it has none.
+
+        Each store that might cover ``t`` is tried in turn; one that
+        fails to open or read is logged and skipped rather than raised,
+        so that the caller goes on to the public bucket.
+        """
         try:
-            prefixes = virtual.virtual_store_for(
-                GeoStoreReader.bucket, GeoStoreReader.endpoint, self.satellite, band
-            )
+            prefixes = self._virtual_prefixes(band, t.replace(tzinfo=None))
         except Exception:
-            logger.info("virtualized tier unreachable for %s %s", self.satellite, band)
+            logger.info(
+                "virtualized tier unreachable for %s %s", self.satellite, band, exc_info=True
+            )
             return None
 
         target = np.datetime64(self._snap_time(t).replace(tzinfo=None), "ns")
-        # Half a slot: the fallback must not quietly hand back a
+        # Half a slot: the tier must not quietly hand back a
         # neighbouring scan, because the retrieval takes the interval
         # between frames as its baseline.
         tolerance = np.timedelta64(int(self.step * 30), "s")
         for prefix in prefixes:
             try:
-                ds = virtual.open_virtual_dataset(
-                    GeoStoreReader.bucket, GeoStoreReader.endpoint, prefix
-                )
+                ds, starts = _open_virtual(prefix, target, tolerance)
+                if starts.size == 0:
+                    continue
                 # `t` in an ABI store is the mid-scan instant; the slot
                 # is named by when the scan started.
-                starts = virtual._scan_start(ds)
                 i = int(np.argmin(np.abs(starts - target)))
                 if abs(starts[i] - target) > tolerance:
                     continue
@@ -202,17 +313,54 @@ class GOES:
                 for name in ("planck_fk1", "planck_fk2", "planck_bc1", "planck_bc2"):
                     if name in snap:
                         snap[name] = snap[name].squeeze(drop=True)
+                scene = _abi_to_satpy_like(snap)
+                # The store's global attributes describe the store, not
+                # this scan; the per-pixel scan-time model reads these,
+                # so they must be this scan's own, as on the S3 path.
+                if "time_bounds" in snap:
+                    bounds = np.asarray(snap["time_bounds"].values).ravel()
+                    if bounds.size == 2:
+                        for key, value in zip(("time_coverage_start", "time_coverage_end"), bounds):
+                            scene["Rad"].attrs[key] = _iso_utc(value)
+                else:
+                    scene["Rad"].attrs["time_coverage_start"] = _iso_utc(starts[i])
+                    scene["Rad"].attrs.pop("time_coverage_end", None)
                 logger.info(
-                    "%s %s at %s: no file on S3, read from %s",
+                    "%s %s at %s: read from virtualized store %s",
                     self.satellite,
                     band,
                     target,
                     prefix,
                 )
-                return _abi_to_satpy_like(snap)
+                return scene
             except Exception:
                 logger.info("virtualized store %s did not serve %s", prefix, band, exc_info=True)
         return None
+
+    def virtual_times(self, band: str, start: dt.datetime, end: dt.datetime) -> np.ndarray:
+        """Scan start times the virtualized tier holds within [start, end].
+
+        Empty when the tier is unreachable: availability then rests on
+        the public bucket alone, as it did before the tier existed.
+        """
+        lo = np.datetime64(start.replace(tzinfo=None), "ns")
+        hi = np.datetime64(end.replace(tzinfo=None), "ns")
+        found = []
+        try:
+            prefixes = self._virtual_prefixes(band, start.replace(tzinfo=None))
+        except Exception:
+            logger.info("virtualized tier unreachable for %s %s", self.satellite, band)
+            return np.array([], dtype="datetime64[ns]")
+        for prefix in prefixes:
+            try:
+                _, starts = _open_virtual(prefix, hi, np.timedelta64(0, "s"))
+            except Exception:
+                logger.info("virtualized store %s could not be opened", prefix, exc_info=True)
+                continue
+            found.append(starts[(starts >= lo) & (starts <= hi)])
+        if not found:
+            return np.array([], dtype="datetime64[ns]")
+        return np.unique(np.concatenate(found))
 
     def download(self, t: dt.datetime) -> list[Path]:
         """Download the ABI file(s) for ``self.bands`` at ``t``; return paths."""
