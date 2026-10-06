@@ -750,6 +750,9 @@ def _icechunk_available_times(
     The loader picks whichever store carries the band and covers the
     time, so availability has to consider the same set — otherwise the
     filter rejects timestamps the pipeline could actually retrieve.
+    For GK-2A (``virtual_only``) that set is the virtualized stores alone.
+    ``start`` prunes virtual stores cut before the window without
+    opening them.
     """
     src, _ = _icechunk_source(sat_id, band)
     resolved = src.bands[0]
@@ -757,7 +760,7 @@ def _icechunk_available_times(
     hi = np.datetime64(end, "ns")
 
     found: list[np.ndarray] = []
-    for prefix in src._candidate_stores(resolved):
+    for prefix in src._candidate_stores(resolved, start):
         contents = src._store_contents(prefix)
         if contents is None or resolved not in contents[0]:
             continue
