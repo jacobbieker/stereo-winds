@@ -233,7 +233,7 @@ def _make_goes_source(
     cache_dir: str | Path | None = None,
     product: str = "ABI-L1b-RadF",
 ):
-    """Create a standalone public-S3 GOES ABI reader."""
+    """Create a standalone GOES ABI reader (virtualized tier, then public S3)."""
     from stereo_winds.readers.goes import GOES
 
     return GOES(

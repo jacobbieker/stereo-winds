@@ -43,7 +43,7 @@ No linter or formatter is configured.
 ## Architecture
 
 **Pipeline flow** (`pipeline.py` orchestrates):
-1. **Data loading** (`data_loading.py`) — Load 5 scenes (A±, A0, B±, B_plus) in native fixed-grid coordinates; GOES ABI comes from NOAA's public S3 buckets via `readers/goes.py` (no credentials needed)
+1. **Data loading** (`data_loading.py`) — Load 5 scenes (A±, A0, B±, B_plus) in native fixed-grid coordinates; GOES ABI comes from the virtualized icechunk stores on source.coop, falling back to NOAA's public S3 buckets, via `readers/goes.py` (no credentials needed)
 2. **Remapping** (`remap.py`) — Remap satellite B scenes onto satellite A's grid via precomputed LUT
 3. **Disparity** (`disparity.py`) — Run RAFT optical flow on 4 image pairs (cross-sat and temporal)
 4. **Solver** (`solver.py`) — Build 8×5 design matrix from parallax vectors and time offsets; solve per-pixel WLS system
@@ -55,7 +55,7 @@ No linter or formatter is configured.
 - `config.py` — `SatelliteConfig` and `StereoPairConfig` dataclasses. Presets: `GOES16_CONFIG`, `GOES18_CONFIG`, `GOES19_CONFIG`, `HIMAWARI8_CONFIG`, `HIMAWARI9_CONFIG`, `MTG_I1_CONFIG`, plus the `SATELLITE_CONFIGS` lookup used by the CLI.
 - `time_model.py` — Per-pixel scan time offsets for ABI/AHI instruments
 - `flow/` — Vendored single-channel RAFT (BSD-3, see `flow/raft/LICENSE-RAFT`) and the `FlowRunner` wrapper
-- `readers/goes.py` — Standalone public-S3 GOES ABI reader
+- `readers/goes.py` — Standalone GOES ABI reader (virtualized icechunk first, public S3 second)
 - `visualize.py` — Debug plotting with cartopy geostationary projections
 - `validation/` — Metrics (RMSVD, speed bias), comparison against AMVs, radiosondes, EarthCARE curtains, ground points
 - `nn/`, `student_*` — Single-satellite "student" model distilled from the stereo retrieval

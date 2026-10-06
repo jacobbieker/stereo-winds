@@ -37,9 +37,13 @@ a separate store per band.  Five GK-2A bands from cold: 64 s through
 satpy, 112 s through here.  A single band from cold goes the other way
 (58 s vs 7 s), which is why the comparison has to be made over the bands
 a retrieval actually loads.  GOES and Himawari are better served by
-their materialised stores again (0.7 s and 0.8 s a band).  So this tier
-sits *after* those stores and before the satpy fallback, rather than in
-front of everything.
+their materialised stores again (0.7 s and 0.8 s a band).  So for those
+readers this tier sits *after* those stores and before the satpy
+fallback, rather than in front of everything.  GOES is the exception:
+:mod:`stereo_winds.readers.goes` has no materialised store to prefer
+and reads one band per call either way, so it asks this tier first and
+the public bucket second, caching each opened store so the cold open is
+paid once per process rather than once per band.
 
 *Coverage is a snapshot, not a feed.*  These stores are cut at a date
 (the suffix in the name is a cutoff marker, not the coverage end -- a

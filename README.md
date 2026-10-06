@@ -224,7 +224,9 @@ solver follows **Carr et al. (2020)**.
 ## Data sources
 
 The pipeline reads **GOES-R ABI L1b** from the NOAA public S3 buckets (public
-domain, no credentials). Small derived subsets used to regenerate the figures
+domain, no credentials), through the virtualized icechunk stores on
+source.coop where they cover the time and from the buckets directly where
+they do not. Small derived subsets used to regenerate the figures
 are committed under `figures/` and carry their own upstream terms:
 
 | Source | Used for | Terms |

@@ -1,7 +1,8 @@
 """Standalone satellite data readers for stereo-winds.
 
-``GOES`` reads GOES-R ABI L1b radiance from NOAA's public S3 buckets without
-authentication or satpy. ``Himawari``, ``GK2A``, and ``MTG`` read from
+``GOES`` reads GOES-R ABI L1b radiance without authentication or satpy:
+from the virtualized icechunk stores on source.coop first, then NOAA's
+public S3 buckets. ``Himawari``, ``GK2A``, and ``MTG`` read from
 icechunk stores at source.coop (requires ``icechunk``).
 """
 from stereo_winds.readers.goes import GOES

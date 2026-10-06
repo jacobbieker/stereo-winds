@@ -807,6 +807,20 @@ def _goes_available_times(
     return np.unique(np.array(found, dtype="datetime64[ns]"))
 
 
+def _goes_virtual_times(
+    sat_id: str,
+    band: str,
+    start: datetime,
+    end: datetime,
+    product: str = "ABI-L1b-RadF",
+) -> np.ndarray:
+    """Scan start times in the virtualized GOES stores, which the reader
+    tries before the public bucket."""
+    from stereo_winds.readers.goes import GOES
+
+    return GOES(satellite=sat_id, product=product, bands=[band]).virtual_times(band, start, end)
+
+
 _AHI_SLOT_RE = re.compile(r"HS_H\d\d_(\d{8})_(\d{4})_")
 _AMI_SLOT_RE = re.compile(r"_(\d{12})\.nc$")
 
@@ -888,11 +902,20 @@ def satellite_available_times(
     For the icechunk-backed satellites this is the union of the store's
     coverage and, unless disabled, the public-S3 L1b the readers fall
     back to — so the filter does not reject times the pipeline could
-    actually load.
+    actually load.  GOES is the union of its virtualized stores (read
+    first) and the public bucket (the fallback).
     """
     if "goes" in sat_id:
-        times = _goes_available_times(sat_id, band, start, end, product)
-        logger.info("  %s: %d scans available (S3)", sat_id, len(times))
+        virtual = _goes_virtual_times(sat_id, band, start, end, product)
+        s3 = _goes_available_times(sat_id, band, start, end, product)
+        times = np.unique(np.concatenate([virtual, s3]))
+        logger.info(
+            "  %s: %d scans available (%d virtualized, %d public S3)",
+            sat_id,
+            len(times),
+            len(virtual),
+            len(s3),
+        )
         return times
 
     store = _icechunk_available_times(sat_id, band, start, end)
