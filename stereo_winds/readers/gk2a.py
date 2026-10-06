@@ -10,12 +10,14 @@ the scene.  The shared mechanics live in
 
 Icechunk stores
 ---------------
-- ``geo/gk2a_500m.icechunk``  — AMI band VI006          (500 m VIS)
-- ``geo/gk2a_1000m.icechunk`` — AMI bands VI004-VI008   (1 km VIS)
-- ``geo/gk2a_2000m.icechunk`` — AMI bands NR013-IR133   (2 km NIR/IR)
+Only the virtualized stores are read: ``geo/virtualized/gk2a_ami_fd_<band>
+[_<cutoff>].icechunk``, one per band, referencing the original L1b
+objects on NOAA's bucket.  The materialised ``geo/gk2a_*`` stores are not
+consulted.
 
-Outside the stores' coverage the native AMI L1b netCDFs are read from
-NOAA's public bucket (``s3://noaa-gk2a-pds``) with satpy instead.
+Outside the virtual stores' coverage, or when reading one fails, the
+native AMI L1b netCDFs are read from NOAA's public bucket
+(``s3://noaa-gk2a-pds``) with satpy instead.
 
 Requires ``icechunk`` and ``zarr>=3``.
 """
@@ -127,17 +129,16 @@ class GK2A(GeoStoreReader):
     band_name_hint = "Use AMI names (VI004-IR133) or ABI names (C01-C16)."
     default_band = "IR112"
 
-    # The `_test` stores are the live ones: there is no plain
-    # gk2a_2000m.icechunk in the bucket at all, and the `_test` tier
-    # carries all twelve IR/WV bands.  Discovery still reaches anything
-    # else named gk2a_* if one appears.
+    # Kept for the name only: virtual_only below means no store under
+    # this template (nor any discovered gk2a_* one) is ever opened.
     store_template = "geo/gk2a_{resolution}_test.icechunk"
-    # Newer ingests land in separately named stores; consider
-    # them when the named one lacks the band or the coverage.
     store_discovery_prefix = "gk2a_"
-    # GK-2A was never materialised into geo/; the virtualized tier is the
-    # only icechunk path it has, and it beats the satpy fallback by ~9x.
+    # GK-2A was never kept current in geo/: the virtualized tier
+    # (geo/virtualized/gk2a_ami_*, appended operationally) is the only
+    # icechunk path read, and a miss or failure there goes straight to
+    # the satpy fallback on noaa-gk2a-pds.
     virtual_satellite = "gk2a_ami"
+    virtual_only = True
     scan_interval_minutes = _FULL_DISK_MINUTES
 
     coord_names = {

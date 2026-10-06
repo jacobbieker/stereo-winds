@@ -1,17 +1,27 @@
 """Tests for the GK-2A AMI icechunk reader."""
 
 import datetime as dt
+import importlib.util
+import sys
+import time
+from pathlib import Path
 
 import numpy as np
 import pytest
 import xarray as xr
 
+from stereo_winds.readers import _geos_store
+from stereo_winds.readers._satpy_s3 import SceneNotInStore
 from stereo_winds.readers.gk2a import (
     GK2A,
     _ABI_TO_AMI,
     _BAND_RESOLUTION,
     _resolve_band,
 )
+from stereo_winds.readers.himawari import Himawari
+
+VIRTUAL_IR112 = "geo/virtualized/gk2a_ami_fd_ir112.icechunk"
+VIRTUAL_IR112_2025 = "geo/virtualized/gk2a_ami_fd_ir112_2025-12-31.icechunk"
 
 
 # ── Offline unit tests (no network) ──────────────────────────────────
@@ -169,6 +179,186 @@ class TestGK2AConfig:
         assert GK2A_CONFIG.n_cols == 5500
 
 
+@pytest.fixture
+def bucket(monkeypatch):
+    """Stand in for both the geo/ listing and the geo/virtualized one."""
+    from stereo_winds.readers import _virtual_store as virtual
+
+    geo = [
+        "gk2a_2000m_test.icechunk",
+        "gk2a_2000m.icechunk",
+        "himawari_2000m_test.icechunk",
+        "himawari_2000m.icechunk",
+    ]
+    virtualized = [
+        "gk2a_ami_fd_ir112.icechunk",
+        "gk2a_ami_fd_ir112_2025-12-31.icechunk",
+        "gk2a_ami_fd_ir105.icechunk",
+        "ahi_h9_fd_b14.icechunk",
+    ]
+    monkeypatch.setattr(_geos_store, "_BUCKET_LISTINGS", {})
+    monkeypatch.setattr(_geos_store, "_STORE_CONTENTS", {})
+    monkeypatch.setattr(
+        _geos_store.GeoStoreReader, "_bucket_stores", classmethod(lambda cls: geo)
+    )
+    monkeypatch.setattr(virtual, "list_virtual_stores", lambda *a, **k: virtualized)
+    return geo, virtualized
+
+
+class TestVirtualOnlyCandidates:
+    def test_gk2a_reads_only_the_virtual_stores(self, bucket):
+        order = GK2A(bands=["IR112"])._candidate_stores("IR112")
+        assert order == [VIRTUAL_IR112, VIRTUAL_IR112_2025]
+        assert not any(p.startswith("geo/gk2a_") for p in order)
+
+    def test_virtual_candidates_are_pruned_by_time(self, bucket):
+        order = GK2A(bands=["IR112"])._candidate_stores("IR112", dt.datetime(2026, 8, 1))
+        assert order == [VIRTUAL_IR112]
+
+    def test_discovery_off_still_reads_virtual(self, bucket, monkeypatch):
+        monkeypatch.setattr(GK2A, "store_discovery_prefix", "")
+        order = GK2A(bands=["IR112"])._candidate_stores("IR112")
+        assert order == [VIRTUAL_IR112, VIRTUAL_IR112_2025]
+
+    def test_other_readers_are_unchanged(self, bucket):
+        assert Himawari.virtual_only is False
+        order = Himawari(bands=["C14"])._candidate_stores("B14")
+        assert order[0] == "geo/himawari_2000m_test.icechunk"
+        assert "geo/himawari_2000m.icechunk" in order
+
+    def test_other_readers_keep_named_store_only_without_discovery(
+        self, bucket, monkeypatch
+    ):
+        monkeypatch.setattr(Himawari, "store_discovery_prefix", "")
+        assert Himawari(bands=["C14"])._candidate_stores("B14") == [
+            "geo/himawari_2000m_test.icechunk"
+        ]
+
+
+def _s3_scene():
+    return xr.Dataset({"Rad": (("time", "band", "y", "x"), np.zeros((1, 1, 2, 2)))})
+
+
+class TestVirtualThenS3:
+    """A virtual miss or failure is served from noaa-gk2a-pds via satpy."""
+
+    @pytest.fixture
+    def s3_calls(self, monkeypatch):
+        calls = []
+
+        def fake_s3(self, t, band):
+            calls.append((t, band))
+            out = _s3_scene()
+            out.attrs["source"] = "public S3 L1b via satpy"
+            return out
+
+        monkeypatch.setattr(GK2A, "_s3_data_at_time", fake_s3)
+        monkeypatch.setattr(GK2A, "prune_download_cache", lambda self, t: None)
+        return calls
+
+    def test_virtual_miss_falls_back_to_s3(self, bucket, monkeypatch, s3_calls):
+        when = dt.datetime(2026, 8, 1, 3, 0)
+        # The only store left after pruning ends a day before the request.
+        _geos_store._STORE_CONTENTS[VIRTUAL_IR112] = (
+            frozenset({"IR112"}),
+            np.datetime64("2026-01-01", "ns"),
+            np.datetime64("2026-07-31", "ns"),
+        )
+        opened = []
+        monkeypatch.setattr(GK2A, "_open_dataset_at", lambda self, p: opened.append(p))
+        ds = GK2A(bands=["IR112"]).data_at_time(when)
+        assert s3_calls == [(when, "IR112")]
+        assert ds.attrs["source"] == "public S3 L1b via satpy"
+        assert opened == []  # nothing in geo/gk2a_* was even opened
+
+    def test_virtual_error_falls_back_to_s3(self, bucket, monkeypatch, s3_calls):
+        def boom(self, prefix):
+            raise OSError(f"ranged GET failed for {prefix}")
+
+        monkeypatch.setattr(GK2A, "_open_dataset_at", boom)
+        # Store contents are known, so selection succeeds and the open fails.
+        _geos_store._STORE_CONTENTS[VIRTUAL_IR112] = (
+            frozenset({"IR112"}),
+            np.datetime64("2026-01-01", "ns"),
+            np.datetime64("2026-12-31", "ns"),
+        )
+        when = dt.datetime(2026, 8, 1, 3, 0)
+        ds = GK2A(bands=["IR112"]).data_at_time(when)
+        assert s3_calls == [(when, "IR112")]
+        assert ds.attrs["source"] == "public S3 L1b via satpy"
+
+    def test_virtual_hit_does_not_touch_s3(self, bucket, monkeypatch, s3_calls):
+        def served(self, t, band):
+            out = _s3_scene()
+            out.attrs["store"] = self._select_store(band, t)
+            return out
+
+        _geos_store._STORE_CONTENTS[VIRTUAL_IR112] = (
+            frozenset({"IR112"}),
+            np.datetime64("2026-01-01", "ns"),
+            np.datetime64("2026-12-31", "ns"),
+        )
+        monkeypatch.setattr(GK2A, "_icechunk_data_at_time", served)
+        ds = GK2A(bands=["IR112"]).data_at_time(dt.datetime(2026, 8, 1, 3, 0))
+        assert ds.attrs["store"] == VIRTUAL_IR112
+        assert s3_calls == []
+
+    def test_no_fallback_surfaces_the_miss(self, bucket):
+        _geos_store._STORE_CONTENTS[VIRTUAL_IR112] = (
+            frozenset({"IR112"}),
+            np.datetime64("2026-01-01", "ns"),
+            np.datetime64("2026-07-31", "ns"),
+        )
+        g = GK2A(bands=["IR112"], allow_s3_fallback=False)
+        with pytest.raises(SceneNotInStore):
+            g.data_at_time(dt.datetime(2026, 8, 1, 3, 0))
+
+
+def _load_ring():
+    name = "infer_student_global_ring"
+    if name in sys.modules:
+        return sys.modules[name]
+    path = Path(__file__).resolve().parent.parent / "scripts" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class TestAvailability:
+    def test_union_of_virtual_and_s3_without_test_stores(self, bucket, monkeypatch):
+        ring = _load_ring()
+        start = dt.datetime(2026, 8, 1, 0, 0)
+        end = dt.datetime(2026, 8, 1, 1, 0)
+        virtual_times = np.array(
+            ["2026-08-01T00:00", "2026-08-01T00:10", "2026-08-01T00:20"],
+            dtype="datetime64[ns]",
+        )
+        s3_times = np.array(
+            ["2026-08-01T00:20", "2026-08-01T00:30", "2026-08-01T00:40"],
+            dtype="datetime64[ns]",
+        )
+        _geos_store._STORE_CONTENTS[VIRTUAL_IR112] = (
+            frozenset({"IR112"}),
+            virtual_times.min(),
+            virtual_times.max(),
+        )
+        opened = []
+
+        def open_at(self, prefix):
+            opened.append(prefix)
+            return xr.Dataset(coords={"time": virtual_times})
+
+        monkeypatch.setattr(GK2A, "_open_dataset_at", open_at)
+        monkeypatch.setattr(ring, "_s3_l1b_times", lambda *a, **k: s3_times)
+
+        times = ring.satellite_available_times("gk2a", "C14", start, end)
+        expected = np.unique(np.concatenate([virtual_times, s3_times]))
+        np.testing.assert_array_equal(times, expected)
+        assert opened == [VIRTUAL_IR112]
+
+
 # ── Smoke tests (require network access to source.coop) ─────────────
 
 
@@ -200,3 +390,41 @@ class TestGK2ASmoke:
         ds = g.data_at_time(dt.datetime(2024, 1, 15, 3, 0))
         data = ds["Rad"].values[0, 0]
         assert np.isfinite(data).sum() > 0
+
+
+@pytest.mark.network
+class TestGK2AVirtualThenS3Live:
+    """Anonymous reads: the live virtual store first, then noaa-gk2a-pds."""
+
+    def setup_method(self):
+        _geos_store.clear_store_cache()
+
+    def _inside_virtual(self, g):
+        prefix = g._candidate_stores("IR105")[0]
+        assert prefix.startswith("geo/virtualized/gk2a_ami_fd_ir105")
+        times = g._open_dataset_at(prefix)["time"].values
+        return prefix, times[len(times) // 2].astype("datetime64[s]").item()
+
+    def test_reads_ir105_from_virtual_store(self):
+        g = GK2A(bands=["IR105"])
+        prefix, when = self._inside_virtual(g)
+        t0 = time.perf_counter()
+        ds = g.data_at_time(when)
+        print(f"virtual {prefix} at {when}: {time.perf_counter() - t0:.1f}s")
+        assert ds.attrs["source"] == "icechunk"
+        assert ds.attrs["store"].startswith("geo/virtualized/gk2a_ami_fd_ir105")
+        assert np.isfinite(ds["Rad"].values).sum() > 0
+
+    def test_falls_back_to_noaa_bucket(self, monkeypatch, tmp_path):
+        g = GK2A(bands=["IR105"], cache_dir=str(tmp_path))
+        _, when = self._inside_virtual(g)
+
+        def fail(self, prefix):
+            raise OSError("virtual lookup forced to fail")
+
+        monkeypatch.setattr(GK2A, "_open_dataset_at", fail)
+        t0 = time.perf_counter()
+        ds = g.data_at_time(when)
+        print(f"satpy noaa-gk2a-pds at {when}: {time.perf_counter() - t0:.1f}s")
+        assert ds.attrs["source"] == "public S3 L1b via satpy"
+        assert np.isfinite(ds["Rad"].values).sum() > 0

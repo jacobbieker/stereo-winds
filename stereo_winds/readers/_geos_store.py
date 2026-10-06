@@ -119,6 +119,11 @@ class GeoStoreReader:
     # tried *after* the real stores and before the satpy fallback: a win
     # where there is nothing else, never a cost where there is.
     virtual_satellite: str | dict[str, str] | None = None
+    # Read the virtualized tier and nothing else: no named store, no
+    # discovered ones.  For instruments whose materialised stores are
+    # retired (GK-2A), so a miss goes straight to the satpy fallback
+    # rather than through stores nobody keeps current.
+    virtual_only: bool = False
 
     scan_interval_minutes: int = 10
 
@@ -283,7 +288,12 @@ class GeoStoreReader:
         between tiers and newer ingests land in separately named stores,
         so the named store is tried first and the instrument's other
         stores after it.
+
+        A ``virtual_only`` reader gets the virtualized stores alone,
+        whether or not discovery is on.
         """
+        if self.virtual_only:
+            return self._virtual_candidates(band, when)
         preferred = self._store_prefix(self.band_resolution[band])
         discovery = self._discovery_prefix()
         if not discovery:
@@ -535,6 +545,9 @@ class GeoStoreReader:
                 t,
             )
         out = self._s3_data_at_time(t, band)
+        logger.info(
+            "%s %s at %s served from %s", self.satellite, band, t, self.s3_bucket_label()
+        )
         self.prune_download_cache(t)
         return out
 
@@ -584,6 +597,8 @@ class GeoStoreReader:
         out = xr.Dataset({"Rad": Rad})
         out.attrs["sweep_angle_axis"] = self.sweep
         out.attrs["source"] = "icechunk"
+        out.attrs["store"] = prefix
+        logger.info("%s %s at %s served from %s", self.satellite, band, t, prefix)
         semi_major, semi_minor = scene_ellipsoid(
             snap,
             band,
