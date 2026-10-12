@@ -559,7 +559,7 @@ class TestFilterToCommonTimes:
         )
 
     def test_band_the_satellite_lacks_is_not_used(self, monkeypatch):
-        """MTG has no C14; availability must fall back to a band it carries."""
+        """SEVIRI has no C04; availability must fall back to a band it carries."""
         asked: list[str] = []
 
         def fake(sat_id, band, start, end, product="ABI-L1b-RadF"):
@@ -568,13 +568,13 @@ class TestFilterToCommonTimes:
 
         monkeypatch.setattr(ring, "satellite_available_times", fake)
         ring.filter_to_common_times(
-            [datetime(2026, 8, 1, 0, 20)], ["mtg-i1"], ["C14", "C10"], ["C14"]
+            [datetime(2026, 8, 1, 0, 20)], ["msg-iodc"], ["C04", "C10"], ["C04"]
         )
         assert asked == ["C10"]
 
     def test_satellite_with_no_usable_band_raises(self):
         with pytest.raises(RuntimeError, match="none of the requested bands"):
-            ring.filter_to_common_times([datetime(2026, 8, 1, 0, 20)], ["mtg-i1"], ["C14"], ["C14"])
+            ring.filter_to_common_times([datetime(2026, 8, 1, 0, 20)], ["msg-iodc"], ["C04"], ["C04"])
 
     def test_empty_candidate_list_is_passed_through(self):
         assert ring.filter_to_common_times([], ["goes19"], ["C14"], ["C14"]) == []
@@ -585,10 +585,13 @@ class TestAvailabilityBand:
         assert ring.availability_band("goes19", ["C14"], ["C02"]) == "C14"
 
     def test_skips_bands_the_satellite_lacks(self):
-        assert ring.availability_band("mtg-i1", ["C14"], ["C10"]) == "C10"
+        assert ring.availability_band("msg-iodc", ["C04"], ["C10"]) == "C10"
 
     def test_none_when_nothing_matches(self):
-        assert ring.availability_band("mtg-i1", ["C14"], ["C14"]) is None
+        assert ring.availability_band("msg-iodc", ["C04"], ["C04"]) is None
+
+    def test_mtg_carries_c14_through_its_nearest_channel(self):
+        assert ring.availability_band("mtg-i1", ["C14"], ["C10"]) == "C14"
 
 
 # ── Mosaic memory behaviour ───────────────────────────────────────────

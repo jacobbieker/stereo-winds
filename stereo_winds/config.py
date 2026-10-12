@@ -236,10 +236,18 @@ ABI_TO_FCI_BAND = {
     "C06": "nir_22",  # 2.25 / 2.25  um
     "C07": "ir_38",  # 3.90 / 3.80  um
     "C08": "wv_63",  # 6.19 / 6.30  um
+    # FCI has no 6.9 um channel. The flow model takes C09 on every run, so
+    # it gets the nearest water-vapour channel rather than zeros, as SEVIRI
+    # does: 7.35 um peaks lower in the troposphere, but tracks the same
+    # moisture features far better than an empty channel.
+    "C09": "wv_73",  # 6.95 / 7.35  um (nearest; also C10)
     "C10": "wv_73",  # 7.34 / 7.35  um
     "C11": "ir_87",  # 8.44 / 8.70  um
     "C12": "ir_97",  # 9.61 / 9.66  um
     "C13": "ir_105",  # 10.35 / 10.50 um
+    # No 11.2 um either; the 10.5 um window channel is the nearest clean
+    # window, as SEVIRI's 10.8 um stands in for both C13 and C14.
+    "C14": "ir_105",  # 11.20 / 10.50 um (nearest; also C13)
     "C15": "ir_123",  # 12.30 / 12.30 um
     "C16": "ir_133",  # 13.30 / 13.30 um
 }
