@@ -33,19 +33,13 @@ class TestResolveBand:
         with pytest.raises(ValueError, match="Unknown band"):
             _resolve_band("X99")
 
-    def test_c09_not_mapped(self):
-        """C09 (6.9 um) has no FCI equivalent.
+    def test_c09_reads_the_nearest_water_vapour_channel(self):
+        """FCI has no 6.9 um channel; 7.35 um stands in rather than zeros."""
+        assert _resolve_band("C09") == "wv_73"
 
-        It now says so, rather than "Unknown band", which read like a
-        typo for a band the ring requests on every run.
-        """
-        with pytest.raises(ValueError, match="no FCI counterpart"):
-            _resolve_band("C09")
-
-    def test_c14_not_mapped(self):
-        """C14 (11.2 um) has no FCI equivalent."""
-        with pytest.raises(ValueError, match="no FCI counterpart"):
-            _resolve_band("C14")
+    def test_c14_reads_the_nearest_window_channel(self):
+        """FCI has no 11.2 um channel; the 10.5 um window stands in."""
+        assert _resolve_band("C14") == "ir_105"
 
 
 class TestBandResolution:
@@ -252,14 +246,15 @@ class TestStoreTiers:
         assert MTG.resolve_band("C05") == "nir_16"
         assert MTG.resolve_band("C06") == "nir_22"
 
-    def test_bands_fci_lacks_explain_themselves(self):
-        """C09 and C14 are default flow bands, so they are asked for on
-        every run; "Unknown band" would read like a typo."""
-        from stereo_winds.readers.mtg import MTG
+    def test_every_default_flow_band_resolves(self):
+        """C09 and C14 are default flow bands, asked for on every run, so
+        each must resolve to a channel FCI carries rather than be zeroed."""
+        from stereo_winds.readers.mtg import MTG, _BAND_RESOLUTION
 
-        for band in ("C09", "C14"):
-            with pytest.raises(ValueError, match="no FCI counterpart"):
-                MTG.resolve_band(band)
+        assert MTG.resolve_band("C09") == "wv_73"
+        assert MTG.resolve_band("C14") == "ir_105"
+        for band in [f"C{i:02d}" for i in range(1, 17)]:
+            assert MTG.resolve_band(band) in _BAND_RESOLUTION
 
     def test_a_real_typo_still_reads_as_one(self):
         from stereo_winds.readers.mtg import MTG

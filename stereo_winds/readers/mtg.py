@@ -24,9 +24,10 @@ import logging
 from stereo_winds.config import ABI_TO_FCI_BAND
 
 # ABI bands with no FCI counterpart at all, as opposed to names that are
-# simply wrong.  C09 is 6.9 um and C14 is 11.2 um; FCI splits the water
-# vapour and window regions differently and has neither.
-ABI_WITHOUT_FCI = ("C09", "C14")
+# simply wrong. FCI has no 6.9 um (C09) or 11.2 um (C14) channel, but
+# ABI_TO_FCI_BAND stands its nearest channels in for both, so every ABI
+# band now resolves.
+ABI_WITHOUT_FCI: tuple[str, ...] = ()
 from stereo_winds.readers._geos_store import GeoStoreReader
 
 logger = logging.getLogger(__name__)
@@ -118,15 +119,10 @@ class MTG(GeoStoreReader):
 
     band_resolution = _BAND_RESOLUTION
     abi_to_native = ABI_TO_FCI_BAND
-    # Declared so these report themselves rather than arriving as
-    # "Unknown band": FCI has no 6.9 um or 11.2 um channel, and both are
-    # default flow bands, so the ring asks for them on every run and
-    # zero-fills what it cannot get.
+    # C09 and C14 are default flow bands with no exact FCI channel; they
+    # resolve to wv_73 and ir_105 through ABI_TO_FCI_BAND, so the ring
+    # gets the nearest channel rather than zero-filling them.
     abi_without_native = ABI_WITHOUT_FCI
-    missing_band_reason = (
-        "FCI carries no 6.9 um or 11.2 um channel; wv_73 (7.35 um) and "
-        "ir_105 (10.5 um) are the nearest, and are already C10 and C13"
-    )
     band_name_hint = (
         "Use FCI names (e.g. ir_105) or ABI names (e.g. C13). "
         "Not every ABI band has an FCI equivalent."

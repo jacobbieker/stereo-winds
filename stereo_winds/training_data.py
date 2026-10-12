@@ -487,7 +487,8 @@ def process_fci_remap(
         if gbands:
             groups.append((gname, gbands, FCI(
                 config=DataSourceConfig(cache_dir=data_cache_dir),
-                bands=[ABI_TO_FCI_BAND[b] for b in gbands],
+                # C09/C14 share wv_73/ir_105 with C10/C13: load each once.
+                bands=list(dict.fromkeys(ABI_TO_FCI_BAND[b] for b in gbands)),
             )))
     src = groups[0][2]  # any source: shared cycle cache dir for purge
 
@@ -527,7 +528,7 @@ def process_fci_remap(
                 n_fail += len(todo_g)
                 continue
 
-            gnames = [ABI_TO_FCI_BAND[b] for b in gbands]
+            gnames = list(dict.fromkeys(ABI_TO_FCI_BAND[b] for b in gbands))
             rad = ds_fci["Rad"].values[0]  # (band, y, x), y ascending
             for band in todo_g:
                 arr = rad[gnames.index(ABI_TO_FCI_BAND[band])]
