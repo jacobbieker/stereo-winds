@@ -27,6 +27,7 @@
 #   AMV_ICECHUNK_REGION             --icechunk-region
 #   AMV_TEMP_DIR                    --temp-dir       (image default: /output)
 #   AMV_SATELLITE_ICECHUNK_BASE     --satellite-icechunk-base
+#   AMV_ARRAY_CHUNK_STEPS           --array-chunk-steps (index: AWS_BATCH_JOB_ARRAY_INDEX)
 # Flags (true/1/yes to enable):
 #   AMV_SKIP_GLOBAL                 --skip-global
 #   AMV_REQUIRE_ALL_SATELLITES      --require-all-satellites
@@ -37,6 +38,8 @@
 #   AMV_KEEP_TEMP                   --keep-temp
 #   AMV_ICECHUNK_ANONYMOUS          --icechunk-anonymous
 #   AMV_ICECHUNK_FORCE_PATH_STYLE   --icechunk-force-path-style
+#   AMV_PREALLOCATE                 --preallocate   (backfill set-up)
+#   AMV_FILL_SLOTS                  --fill-slots    (backfill writer)
 # Anything else:
 #   AMV_EXTRA_ARGS                  appended verbatim (word-split)
 #   container arguments             appended after everything above
@@ -95,6 +98,7 @@ opt AMV_ICECHUNK_ENDPOINT      --icechunk-endpoint
 opt AMV_ICECHUNK_REGION        --icechunk-region
 opt AMV_TEMP_DIR               --temp-dir
 opt AMV_SATELLITE_ICECHUNK_BASE --satellite-icechunk-base
+opt AMV_ARRAY_CHUNK_STEPS      --array-chunk-steps
 
 flag AMV_SKIP_GLOBAL               --skip-global
 flag AMV_REQUIRE_ALL_SATELLITES    --require-all-satellites
@@ -105,6 +109,8 @@ flag AMV_KEEP_NETCDF               --keep-netcdf
 flag AMV_KEEP_TEMP                 --keep-temp
 flag AMV_ICECHUNK_ANONYMOUS        --icechunk-anonymous
 flag AMV_ICECHUNK_FORCE_PATH_STYLE --icechunk-force-path-style
+flag AMV_PREALLOCATE               --preallocate
+flag AMV_FILL_SLOTS                --fill-slots
 
 if [[ -n "${AMV_EXTRA_ARGS:-}" ]]; then
     read -r -a extra <<< "$AMV_EXTRA_ARGS"
