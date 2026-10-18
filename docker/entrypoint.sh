@@ -27,6 +27,7 @@
 #   AMV_ICECHUNK_REGION             --icechunk-region
 #   AMV_TEMP_DIR                    --temp-dir       (image default: /output)
 #   AMV_SATELLITE_ICECHUNK_BASE     --satellite-icechunk-base
+#   AMV_ARRAY_CHUNK_STEPS           --array-chunk-steps (index: AWS_BATCH_JOB_ARRAY_INDEX)
 # Flags (true/1/yes to enable):
 #   AMV_SKIP_GLOBAL                 --skip-global
 #   AMV_REQUIRE_ALL_SATELLITES      --require-all-satellites
@@ -97,6 +98,7 @@ opt AMV_ICECHUNK_ENDPOINT      --icechunk-endpoint
 opt AMV_ICECHUNK_REGION        --icechunk-region
 opt AMV_TEMP_DIR               --temp-dir
 opt AMV_SATELLITE_ICECHUNK_BASE --satellite-icechunk-base
+opt AMV_ARRAY_CHUNK_STEPS      --array-chunk-steps
 
 flag AMV_SKIP_GLOBAL               --skip-global
 flag AMV_REQUIRE_ALL_SATELLITES    --require-all-satellites

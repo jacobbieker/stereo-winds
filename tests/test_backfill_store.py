@@ -336,3 +336,49 @@ class TestScriptFillSlots:
         ds = _open(stores.repo("goes18"))
         assert ds.sizes["time"] == 1
         assert bs.FILLED_VAR not in ds
+
+
+class TestArrayChunk:
+    def test_children_cover_the_range_once(self, ring):
+        times = ring.time_steps(T0, T0 + timedelta(hours=9), 60)
+        parts = [ring.array_chunk(times, 4, i) for i in range(4)]
+        assert [len(p) for p in parts] == [4, 4, 2, 0]
+        assert sum(parts, []) == times
+
+    def test_bad_arguments(self, ring):
+        with pytest.raises(ValueError):
+            ring.array_chunk([T0], 0, 0)
+        with pytest.raises(ValueError):
+            ring.array_chunk([T0], 1, -1)
+
+
+class TestPreallocateCli:
+    def test_lays_out_every_satellite_without_loading_a_model(self, ring, tmp_path, monkeypatch):
+        def no_model(*a, **k):
+            raise AssertionError("--preallocate must not load a model")
+
+        monkeypatch.setattr(ring.StudentWindsModel, "load_from_checkpoint", no_model)
+        monkeypatch.setattr(bs, "_grid_shape", lambda sat: (NY, NX))
+        argv = [
+            "infer_student_global_ring.py", "--preallocate",
+            "--time", "2025-05-01T00:00", "--end-time", "2025-05-01T05:00",
+            "--step-minutes", "60", "--satellites", "goes18,mtg-i1",
+            "--satellite-icechunk-base", str(tmp_path / "amv"),
+            "--icechunk-chunk", "4", "--student-ckpt", "x", "--raft-ckpt", "y",
+            # Ignored by --preallocate: the layout is always the whole range.
+            "--array-chunk-steps", "2", "--array-index", "1",
+        ]  # fmt: skip
+        monkeypatch.setattr(sys, "argv", argv)
+        ring.main()
+        for name in ("amv_goes18.icechunk", "amv_mtg_i1.icechunk"):
+            ds = _open(open_icechunk_repo(str(tmp_path / "amv" / name)))
+            assert ds.sizes["time"] == 6 and ds.attrs[bs.LAYOUT_ATTR] == bs.LAYOUT
+
+    def test_fill_slots_needs_skip_global(self, ring, tmp_path, monkeypatch):
+        argv = [
+            "x", "--fill-slots", "--time", "2025-05-01T00:00",
+            "--satellite-icechunk-base", str(tmp_path), "--student-ckpt", "x", "--raft-ckpt", "y",
+        ]  # fmt: skip
+        monkeypatch.setattr(sys, "argv", argv)
+        with pytest.raises(SystemExit):
+            ring.main()

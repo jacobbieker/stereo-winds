@@ -171,7 +171,10 @@ Each scan is region-written into its slot and committed with rebase, so jobs
 filling different slots never conflict; filled slots are skipped before
 inference, so a retried job only does what is left. Slots with
 `slot_filled == 0` hold no scan (all fields NaN). In the container the same
-flags are `AMV_PREALLOCATE` and `AMV_FILL_SLOTS`. See
+flags are `AMV_PREALLOCATE` and `AMV_FILL_SLOTS`. For a Batch array job, give
+every child the whole range plus `--array-chunk-steps N`
+(`AMV_ARRAY_CHUNK_STEPS`): each child does the `AWS_BATCH_JOB_ARRAY_INDEX`-th
+run of N timestamps. See
 `stereo_winds/backfill_store.py`.
 
 ## Supported satellite pairs

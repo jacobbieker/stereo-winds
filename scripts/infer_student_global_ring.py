@@ -313,6 +313,21 @@ def time_steps(
     return out
 
 
+def array_chunk(times: list[datetime], chunk_steps: int, index: int) -> list[datetime]:
+    """The ``index``-th run of ``chunk_steps`` consecutive timestamps of ``times``.
+
+    For a Batch array job: every child is handed the whole range and its
+    own index (``AWS_BATCH_JOB_ARRAY_INDEX``) and does only its share, so
+    one submission covers a long backfill.  An index past the end gets
+    nothing.
+    """
+    if chunk_steps <= 0:
+        raise ValueError(f"--array-chunk-steps must be positive, got {chunk_steps}")
+    if index < 0:
+        raise ValueError(f"array index must be non-negative, got {index}")
+    return times[index * chunk_steps : (index + 1) * chunk_steps]
+
+
 # ---------------------------------------------------------------------------
 # Data loading: 3-frame radiance cubes from icechunk
 # ---------------------------------------------------------------------------
@@ -2389,6 +2404,20 @@ def main():
         "fill it",
     )
     ic.add_argument(
+        "--array-chunk-steps",
+        type=int,
+        default=None,
+        help="Batch array jobs: of the timestamps from --time to --end-time, "
+        "process only the --array-index-th run of this many (e.g. 72 hourly "
+        "steps = 3 days per child)",
+    )
+    ic.add_argument(
+        "--array-index",
+        type=int,
+        default=None,
+        help="Index for --array-chunk-steps (default: $AWS_BATCH_JOB_ARRAY_INDEX)",
+    )
+    ic.add_argument(
         "--no-netcdf",
         action="store_true",
         help="Write only to the icechunk store, skipping the "
@@ -2452,6 +2481,29 @@ def main():
         times = time_steps(t_start, t_end, args.step_minutes)
     except ValueError as exc:
         ap.error(str(exc))
+
+    if args.array_chunk_steps is not None and not args.preallocate:
+        raw_index = (
+            args.array_index
+            if args.array_index is not None
+            else os.environ.get("AWS_BATCH_JOB_ARRAY_INDEX")
+        )
+        if raw_index is None:
+            ap.error("--array-chunk-steps needs --array-index or AWS_BATCH_JOB_ARRAY_INDEX")
+        try:
+            times = array_chunk(times, args.array_chunk_steps, int(raw_index))
+        except ValueError as exc:
+            ap.error(str(exc))
+        if not times:
+            logger.info("Array index %s is past the end of the range; nothing to do", raw_index)
+            return
+        logger.info(
+            "Array index %s: %s .. %s (%d timestamps)",
+            raw_index,
+            time_tag(times[0]),
+            time_tag(times[-1]),
+            len(times),
+        )
 
     if args.preallocate:
         sats = args.satellites.split(",") if args.satellites else RING_SATELLITES
