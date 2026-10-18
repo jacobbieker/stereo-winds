@@ -131,6 +131,11 @@ from stereo_winds.icechunk_output import (
     write_mosaic_to_icechunk,
     write_satellite_to_icechunk,
 )
+from stereo_winds.backfill_store import (
+    fill_slot,
+    preallocate_satellite_store,
+    slot_status,
+)
 from stereo_winds.readers._cache import (
     DEFAULT_DOWNLOAD_WORKERS,
     DEFAULT_MEMORY_RESERVE,
@@ -1764,11 +1769,16 @@ class SatelliteStores:
     repository.
     """
 
-    def __init__(self, base: str, **storage_kwargs) -> None:
+    def __init__(self, base: str, fill_slots: bool = False, **storage_kwargs) -> None:
         self.base = base
+        self.fill_slots = fill_slots
         self._storage_kwargs = storage_kwargs
         self._repos: dict[str, object] = {}
         self._times: dict[tuple[str, str], set[datetime]] = {}
+        self._slots: dict[tuple[str, str], dict[datetime, bool]] = {}
+        #: Scans retrieved but not published (fill-slot mode): the run
+        #: fails at the end so a retry can fill them.
+        self.publish_failures: list[str] = []
 
     def repo(self, sat_id: str):
         """The repository for ``sat_id``, created on first request."""
@@ -1808,6 +1818,41 @@ class SatelliteStores:
         times = self._times.get((sat_id, branch))
         if times is not None:
             times.add(t0)
+
+    def slot_state(self, sat_id: str, t0: datetime, branch: str = "main") -> str:
+        """``"filled"``, ``"empty"`` or ``"absent"`` (not a slot) in a
+        preallocated store; read once per run, then kept current by
+        :meth:`publish`."""
+        key = (sat_id, branch)
+        slots = self._slots.get(key)
+        if slots is None:
+            slots = slot_status(self.repo(sat_id), branch)
+            self._slots[key] = slots
+        if t0 not in slots:
+            return "absent"
+        return "filled" if slots[t0] else "empty"
+
+    def publish(
+        self,
+        sat_id: str,
+        ds: xr.Dataset,
+        t0: datetime,
+        branch: str = "main",
+        chunk: int = 1024,
+        replace: bool = False,
+    ) -> str:
+        """Write one scan: into its slot (``fill_slots``) or appended."""
+        if not self.fill_slots:
+            outcome = write_satellite_to_icechunk(
+                self.repo(sat_id), ds, t0, branch=branch, chunk=chunk
+            )
+            self.mark(sat_id, t0, branch)
+            return outcome
+        outcome = fill_slot(self.repo(sat_id), ds, t0, branch=branch, replace=replace)
+        slots = self._slots.get((sat_id, branch))
+        if slots is not None and t0 in slots:
+            slots[t0] = True
+        return outcome
 
 
 def process_time(
@@ -1976,12 +2021,26 @@ def _process_time_inner(
             skip_existing
             and skip_global
             and sat_stores is not None
+            and not sat_stores.fill_slots
             and sat_stores.holds(sat_id, t0, icechunk_branch)
         )
+
+    def slot_done(sat_id: str) -> bool:
+        """Fill-slot mode: True when there is nothing to retrieve for this
+        satellite -- its slot is already filled (a retried job), or ``t0``
+        is not a slot of its store at all."""
+        if sat_stores is None or not sat_stores.fill_slots:
+            return False
+        state = sat_stores.slot_state(sat_id, t0, icechunk_branch)
+        if state == "absent":
+            return True
+        return state == "filled" and not replace_existing
 
     def queue(sat_id: str) -> None:
         """Start this satellite's reads, unless it will be skipped."""
         if prefetcher is None:
+            return
+        if slot_done(sat_id):
             return
         if not _needs_inference(
             sat_id, t0, sat_root, skip_existing, write_netcdf, published(sat_id)
@@ -1997,6 +2056,22 @@ def _process_time_inner(
         if published(sat_id):
             logger.info("[%s] %s already in its store — skipping", tag, sat_id)
             done.append(sat_id)
+            if i + 1 < len(todo):
+                queue(todo[i + 1])
+            continue
+        if slot_done(sat_id):
+            if sat_stores.slot_state(sat_id, t0, icechunk_branch) == "absent":
+                logger.error(
+                    "[%s] %s: not a slot of %s (outside the preallocated "
+                    "range?) -- not retrieving it",
+                    tag,
+                    sat_id,
+                    sat_stores.uri(sat_id),
+                )
+                sat_stores.publish_failures.append(f"{sat_id}@{tag}")
+            else:
+                logger.info("[%s] %s slot already filled — skipping", tag, sat_id)
+                done.append(sat_id)
             if i + 1 < len(todo):
                 queue(todo[i + 1])
             continue
@@ -2039,11 +2114,17 @@ def _process_time_inner(
             # must not cost the mosaic a satellite it already has in
             # hand, so it is reported and stepped over.
             try:
-                write_satellite_to_icechunk(
-                    sat_stores.repo(sat_id), ds, t0, branch=icechunk_branch, chunk=icechunk_chunk
+                sat_stores.publish(
+                    sat_id,
+                    ds,
+                    t0,
+                    branch=icechunk_branch,
+                    chunk=icechunk_chunk,
+                    replace=replace_existing,
                 )
-                sat_stores.mark(sat_id, t0, icechunk_branch)
             except Exception:
+                if sat_stores.fill_slots:
+                    sat_stores.publish_failures.append(f"{sat_id}@{tag}")
                 logger.exception(
                     "[%s] Could not publish %s to its store; the disk is "
                     "still usable for this mosaic",
@@ -2289,6 +2370,25 @@ def main():
         "have landed.",
     )
     ic.add_argument(
+        "--preallocate",
+        action="store_true",
+        help="Backfill set-up: lay out each satellite's store under "
+        "--satellite-icechunk-base with one empty slot per step from --time "
+        "to --end-time (inclusive, every --step-minutes), then exit without "
+        "loading any model.  Idempotent on a store already laid out the same "
+        "way.  Use a NEW base: it refuses to touch a store holding anything else",
+    )
+    ic.add_argument(
+        "--fill-slots",
+        action="store_true",
+        help="Backfill mode: write each scan into its slot of a store made by "
+        "--preallocate, committing with rebase so many jobs can fill disjoint "
+        "slots of one store at once.  Filled slots are skipped before "
+        "inference (unless --replace-existing).  Needs --skip-global.  Exits "
+        "non-zero if any retrieved scan could not be written, so a retry can "
+        "fill it",
+    )
+    ic.add_argument(
         "--no-netcdf",
         action="store_true",
         help="Write only to the icechunk store, skipping the "
@@ -2339,12 +2439,41 @@ def main():
     if args.icechunk_store and args.skip_global:
         ap.error("--icechunk-store writes the global mosaic, which " "--skip-global disables")
 
+    if (args.preallocate or args.fill_slots) and not args.satellite_icechunk_base:
+        ap.error("--preallocate and --fill-slots need --satellite-icechunk-base")
+    if args.fill_slots and not args.skip_global:
+        ap.error("--fill-slots writes per-satellite stores only; add --skip-global")
+    if args.preallocate and args.fill_slots:
+        ap.error("--preallocate is a one-off set-up step; run --fill-slots afterwards")
+
     t_start = datetime.fromisoformat(args.time)
     t_end = datetime.fromisoformat(args.end_time) if args.end_time else None
     try:
         times = time_steps(t_start, t_end, args.step_minutes)
     except ValueError as exc:
         ap.error(str(exc))
+
+    if args.preallocate:
+        sats = args.satellites.split(",") if args.satellites else RING_SATELLITES
+        stores = SatelliteStores(
+            args.satellite_icechunk_base,
+            endpoint_url=args.icechunk_endpoint,
+            region=args.icechunk_region,
+            anonymous=args.icechunk_anonymous,
+            force_path_style=args.icechunk_force_path_style,
+        )
+        for sat_id in sats:
+            outcome = preallocate_satellite_store(
+                stores.repo(sat_id),
+                sat_id,
+                times[0],
+                times[-1],
+                step_minutes=args.step_minutes,
+                branch=args.icechunk_branch,
+                chunk=args.icechunk_chunk,
+            )
+            logger.info("%s: %s (%s)", sat_id, outcome, stores.uri(sat_id))
+        return
 
     out_dir = Path(args.output_dir)
 
@@ -2432,6 +2561,7 @@ def main():
     if args.satellite_icechunk_base:
         sat_stores = SatelliteStores(
             args.satellite_icechunk_base,
+            fill_slots=args.fill_slots,
             endpoint_url=args.icechunk_endpoint,
             region=args.icechunk_region,
             anonymous=args.icechunk_anonymous,
@@ -2538,6 +2668,13 @@ def main():
     if n_ok == 0:
         logger.error("No timestamps produced output. Exiting.")
         sys.exit(1)
+    if sat_stores is not None and sat_stores.publish_failures:
+        logger.error(
+            "%d scan(s) not written to their slots: %s",
+            len(sat_stores.publish_failures),
+            ", ".join(sat_stores.publish_failures),
+        )
+        sys.exit(3)
 
 
 if __name__ == "__main__":

@@ -147,6 +147,33 @@ ds = create_output_dataset(solution, GOES19, t0)
 write_netcdf(ds, "output/stereo_winds.nc")
 ```
 
+### Backfilling a per-satellite store in parallel
+
+The per-satellite stores (`--satellite-icechunk-base`) are normally appended
+to one scan at a time by one writer. To backfill a long period with many GPU
+jobs at once, lay the store out first and then fill its slots:
+
+```bash
+# once per satellite: one empty slot per hour (metadata only)
+python scripts/infer_student_global_ring.py --preallocate \
+    --time 2025-04-30T12:00 --end-time 2026-10-05T11:00 --step-minutes 60 \
+    --satellites goes19 --satellite-icechunk-base s3://bucket/amv-backfill \
+    --student-ckpt ... --raft-ckpt ...
+
+# any number of jobs, each over its own (or even an overlapping) range
+python scripts/infer_student_global_ring.py --fill-slots --skip-global --no-netcdf \
+    --time 2025-05-01T00:00 --end-time 2025-05-03T23:00 --step-minutes 60 \
+    --satellites goes19 --satellite-icechunk-base s3://bucket/amv-backfill \
+    --student-ckpt ... --raft-ckpt ... --device cuda
+```
+
+Each scan is region-written into its slot and committed with rebase, so jobs
+filling different slots never conflict; filled slots are skipped before
+inference, so a retried job only does what is left. Slots with
+`slot_filled == 0` hold no scan (all fields NaN). In the container the same
+flags are `AMV_PREALLOCATE` and `AMV_FILL_SLOTS`. See
+`stereo_winds/backfill_store.py`.
+
 ## Supported satellite pairs
 
 | Pair | Separation | Coverage |

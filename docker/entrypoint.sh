@@ -37,6 +37,8 @@
 #   AMV_KEEP_TEMP                   --keep-temp
 #   AMV_ICECHUNK_ANONYMOUS          --icechunk-anonymous
 #   AMV_ICECHUNK_FORCE_PATH_STYLE   --icechunk-force-path-style
+#   AMV_PREALLOCATE                 --preallocate   (backfill set-up)
+#   AMV_FILL_SLOTS                  --fill-slots    (backfill writer)
 # Anything else:
 #   AMV_EXTRA_ARGS                  appended verbatim (word-split)
 #   container arguments             appended after everything above
@@ -105,6 +107,8 @@ flag AMV_KEEP_NETCDF               --keep-netcdf
 flag AMV_KEEP_TEMP                 --keep-temp
 flag AMV_ICECHUNK_ANONYMOUS        --icechunk-anonymous
 flag AMV_ICECHUNK_FORCE_PATH_STYLE --icechunk-force-path-style
+flag AMV_PREALLOCATE               --preallocate
+flag AMV_FILL_SLOTS                --fill-slots
 
 if [[ -n "${AMV_EXTRA_ARGS:-}" ]]; then
     read -r -a extra <<< "$AMV_EXTRA_ARGS"
