@@ -1058,6 +1058,47 @@ class TestSatelliteStores:
         # The mosaic still got both satellites.
         assert ring.global_nc_path(tmp_path, T0).exists()
 
+    def test_skip_existing_checks_the_store_before_inference(self, tmp_path, stub_infer):
+        """--skip-global --no-netcdf has no file to look at: the per-satellite
+        store is the only sink, so a timestamp already there must not be
+        retrieved again (the operational jobs recomputed every overlap)."""
+        pytest.importorskip("icechunk")
+        stores = ring.SatelliteStores(str(tmp_path / "amv"))
+        kw = dict(sat_stores=stores, skip_global=True, write_netcdf=False, skip_existing=True)
+        assert _run(T0, tmp_path / "out", **kw) is True
+        assert sorted(stub_infer) == [("goes18", T0), ("goes19", T0)]
+
+        # A fresh run (new process, nothing cached) over the same timestamp
+        # plus a new one: only the new one is retrieved.
+        stores = ring.SatelliteStores(str(tmp_path / "amv"))
+        kw["sat_stores"] = stores
+        t1 = T0 + timedelta(minutes=10)
+        assert _run(T0, tmp_path / "out", **kw) is True
+        assert _run(t1, tmp_path / "out", **kw) is True
+        assert sorted(stub_infer[2:]) == [("goes18", t1), ("goes19", t1)]
+        # And within one run, what it just published counts as present.
+        assert _run(t1, tmp_path / "out", **kw) is True
+        assert len(stub_infer) == 4
+
+    def test_store_is_ignored_without_skip_existing(self, tmp_path, stub_infer):
+        pytest.importorskip("icechunk")
+        stores = ring.SatelliteStores(str(tmp_path / "amv"))
+        kw = dict(sat_stores=stores, skip_global=True, write_netcdf=False)
+        _run(T0, tmp_path / "out", calls_sats=("goes18",), **kw)
+        _run(T0, tmp_path / "out", calls_sats=("goes18",), **kw)
+        assert len(stub_infer) == 2
+
+    def test_mosaic_runs_still_retrieve_published_satellites(self, tmp_path, stub_infer):
+        """Without --skip-global the mosaic needs the disk itself, so a store
+        holding the timestamp is not a reason to skip the retrieval."""
+        pytest.importorskip("icechunk")
+        stores = ring.SatelliteStores(str(tmp_path / "amv"))
+        _run(T0, tmp_path / "a", sat_stores=stores, skip_global=True, write_netcdf=False)
+        n = len(stub_infer)
+        assert _run(T0, tmp_path / "b", sat_stores=stores, skip_existing=True) is True
+        assert len(stub_infer) == n + 2
+        assert ring.global_nc_path(tmp_path / "b", T0).exists()
+
     def test_no_stores_when_not_asked_for(self, tmp_path, stub_infer):
         _run(T0, tmp_path)
         assert not (tmp_path / "amv").exists()
