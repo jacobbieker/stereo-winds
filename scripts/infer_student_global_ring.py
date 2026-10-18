@@ -648,13 +648,22 @@ def _needs_inference(
     out_dir: Path,
     skip_existing: bool,
     write_netcdf: bool,
+    published: bool = False,
 ) -> bool:
     """False when this satellite's output already exists and will be reused.
+
+    ``published`` says the satellite's own icechunk store already holds
+    ``t0`` and nothing else needs the disk (``--skip-global``): the store
+    is then the output, and there is nothing to recompute.
 
     Prefetching for a satellite that is about to be skipped queues work
     nobody collects.
     """
-    if not (skip_existing and write_netcdf):
+    if not skip_existing:
+        return True
+    if published:
+        return False
+    if not write_netcdf:
         return True
     return not sat_nc_path(out_dir, sat_id, t0).exists()
 
@@ -1759,6 +1768,7 @@ class SatelliteStores:
         self.base = base
         self._storage_kwargs = storage_kwargs
         self._repos: dict[str, object] = {}
+        self._times: dict[tuple[str, str], set[datetime]] = {}
 
     def repo(self, sat_id: str):
         """The repository for ``sat_id``, created on first request."""
@@ -1771,6 +1781,33 @@ class SatelliteStores:
 
     def uri(self, sat_id: str) -> str:
         return satellite_store_uri(self.base, sat_id)
+
+    def times(self, sat_id: str, branch: str = "main") -> set[datetime]:
+        """Timestamps ``sat_id``'s store already holds, read once per run.
+
+        Kept up to date by :meth:`mark` as this run publishes, so a range
+        is listed from the store only once rather than at every timestamp.
+        """
+        key = (sat_id, branch)
+        times = self._times.get(key)
+        if times is None:
+            times = icechunk_existing_times(self.repo(sat_id), branch)
+            self._times[key] = times
+        return times
+
+    def holds(self, sat_id: str, t0: datetime, branch: str = "main") -> bool:
+        """True if ``sat_id``'s store already holds ``t0``; False if unknown."""
+        try:
+            return t0 in self.times(sat_id, branch)
+        except Exception:
+            logger.exception("Could not list %s's store; assuming %s is missing", sat_id, t0)
+            return False
+
+    def mark(self, sat_id: str, t0: datetime, branch: str = "main") -> None:
+        """Record that ``t0`` is now in ``sat_id``'s store."""
+        times = self._times.get((sat_id, branch))
+        if times is not None:
+            times.add(t0)
 
 
 def process_time(
@@ -1930,11 +1967,25 @@ def _process_time_inner(
 
     rad_tf = int(getattr(model, "rad_time_frames", 1)) if model is not None else 1
 
+    def published(sat_id: str) -> bool:
+        """True when the satellite's store already has ``t0`` and that is all
+        this run would produce for it (``--skip-global``: no mosaic needs the
+        disk).  Without this a ``--skip-global --no-netcdf`` resume had no
+        sink to look at and recomputed every timestamp already published."""
+        return (
+            skip_existing
+            and skip_global
+            and sat_stores is not None
+            and sat_stores.holds(sat_id, t0, icechunk_branch)
+        )
+
     def queue(sat_id: str) -> None:
         """Start this satellite's reads, unless it will be skipped."""
         if prefetcher is None:
             return
-        if not _needs_inference(sat_id, t0, sat_root, skip_existing, write_netcdf):
+        if not _needs_inference(
+            sat_id, t0, sat_root, skip_existing, write_netcdf, published(sat_id)
+        ):
             return
         prefetcher.submit(scene_requests(sat_id, t0, flow_bands, rad_bands, rad_tf))
 
@@ -1943,6 +1994,12 @@ def _process_time_inner(
         queue(todo[0])
 
     for i, sat_id in enumerate(todo):
+        if published(sat_id):
+            logger.info("[%s] %s already in its store — skipping", tag, sat_id)
+            done.append(sat_id)
+            if i + 1 < len(todo):
+                queue(todo[i + 1])
+            continue
         nc_path = sat_nc_path(sat_root, sat_id, t0)
         ds = None
         if skip_existing and write_netcdf and nc_path.exists():
@@ -1985,6 +2042,7 @@ def _process_time_inner(
                 write_satellite_to_icechunk(
                     sat_stores.repo(sat_id), ds, t0, branch=icechunk_branch, chunk=icechunk_chunk
                 )
+                sat_stores.mark(sat_id, t0, icechunk_branch)
             except Exception:
                 logger.exception(
                     "[%s] Could not publish %s to its store; the disk is "
